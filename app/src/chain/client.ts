@@ -7,9 +7,9 @@ import { getAuthToken, permissionPdaFromAccount } from "@magicblock-labs/ephemer
 import nacl from "tweetnacl";
 import idl from "../idl/inside_job.json";
 import {
-  BASE_RPC, EPHEMERAL_VAULT, MAGIC_CONTEXT, MAGIC_PROGRAM, PROGRAM_ID, TEE_RPC, TEE_WS, VRF_EPHEMERAL_QUEUE,
+  ATA_PROGRAM, BASE_RPC, EPHEMERAL_VAULT, MAGIC_CONTEXT, MAGIC_PROGRAM, PROGRAM_ID, TEE_RPC, TEE_WS, TOKEN_PROGRAM, VRF_EPHEMERAL_QUEUE,
 } from "./config";
-import { ROOM_SIZE, decodePot, decodeRoom, decodeView, decodeWorld, MAXP, PotState, RoomState, ViewState, WorldState } from "./decode";
+import { ROOM_SIZE, decodeMarket, decodePot, decodeRoom, decodeView, decodeWorld, MarketState, MAXP, PotState, RoomState, ViewState, WorldState } from "./decode";
 
 export const PERMISSION_PROGRAM = new PublicKey("ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1");
 export const VRF_PROGRAM = new PublicKey("Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz");
@@ -27,6 +27,15 @@ export const permPda = (acc: PublicKey) => permissionPdaFromAccount(acc);
 const le64n = (n: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(n); return b; };
 export const potPda = (id: number, nonce: bigint) =>
   PublicKey.findProgramAddressSync([Buffer.from("pot"), le64(id), le64n(nonce)], PROGRAM_ID)[0];
+/** The heist's move log (rollup only; sealed until lights-on). */
+export const logPda = (id: number) => PublicKey.findProgramAddressSync([Buffer.from("log"), le64(id)], PROGRAM_ID)[0];
+const le32 = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(n >>> 0); return b; };
+/** The Tip Line for heist `matchNo` of room `id` (Solana). */
+export const marketPda = (id: number, matchNo: number) =>
+  PublicKey.findProgramAddressSync([Buffer.from("market"), le64(id), le32(matchNo)], PROGRAM_ID)[0];
+/** Associated token account of `owner` for `mint`. */
+export const ataOf = (owner: PublicKey, mint: PublicKey) =>
+  PublicKey.findProgramAddressSync([owner.toBuffer(), TOKEN_PROGRAM.toBuffer(), mint.toBuffer()], ATA_PROGRAM)[0];
 export function randomNonce(): bigint {
   const b = new Uint8Array(8);
   crypto.getRandomValues(b);
@@ -167,6 +176,25 @@ export class GameClient {
     const i = await this.conn.getAccountInfo(worldPda(id));
     return i && i.data.length >= 600 ? decodeWorld(i.data) : null;
   }
+  /** Raw Room + World + move log from the rollup (public after lights-on) for the replay. */
+  async fetchRevealed(id: number): Promise<{ room: Uint8Array; world: Uint8Array; log: Uint8Array } | null> {
+    const [r, w, l] = await this.conn.getMultipleAccountsInfo([roomPda(id), worldPda(id), logPda(id)]);
+    if (!r || !w || !l) return null;
+    return { room: r.data, world: w.data, log: l.data };
+  }
+  /** The Room as Solana holds it (the last commit), read from the base layer. */
+  async fetchBaseRoom(id: number): Promise<RoomState | null> {
+    const i = await this.base.getAccountInfo(roomPda(id));
+    return i && i.data.length >= 8 + ROOM_SIZE ? decodeRoom(i.data) : null;
+  }
+  /** Token base units `owner` holds of `mint` (0 if no token account yet). */
+  async tokenUnits(owner: PublicKey, mint: PublicKey): Promise<number> {
+    try { return Number((await this.base.getTokenAccountBalance(ataOf(owner, mint))).value.amount); } catch { return 0; }
+  }
+  async fetchMarket(id: number, matchNo: number): Promise<MarketState | null> {
+    const i = await this.base.getAccountInfo(marketPda(id, matchNo));
+    return i && i.data.length >= 8 + 1362 ? decodeMarket(i.data) : null;
+  }
   /** Raw read used by the "try to cheat" console: returns null when the TEE refuses. */
   async tryRead(addr: PublicKey): Promise<{ ok: boolean; bytes: number; note: string }> {
     try {
@@ -248,30 +276,77 @@ export class GameClient {
     return i && i.data.length >= 8 + 612 ? decodePot(i.data) : null;
   }
 
-  /** The wallet pays the stake into the Pot and names this browser's session key. */
-  async buyTicket(wallet: InjectedWallet, id: number, nonce: bigint): Promise<string> {
+  /** The wallet pays the stake (USDC) into the Pot and names this browser's session key. */
+  async buyTicket(wallet: InjectedWallet, id: number, nonce: bigint, mint: PublicKey): Promise<string> {
     const owner = wallet.publicKey!;
+    const pot = potPda(id, nonce);
     const ix = await this.program.methods
       .buyTicket(new BN(id), new BN(nonce.toString()), this.pubkey)
-      .accountsPartial({ wallet: owner, room: roomPda(id), pot: potPda(id, nonce), systemProgram: SystemProgram.programId })
+      .accountsPartial({
+        wallet: owner, walletAta: ataOf(owner, mint), room: roomPda(id), pot, vault: ataOf(pot, mint), mint,
+        tokenProgram: TOKEN_PROGRAM, ataProgram: ATA_PROGRAM, systemProgram: SystemProgram.programId,
+      })
       .instruction();
-    return this.sendBase(wallet, [ix], "buy ticket (stake into the Pot)");
+    return this.sendBase(wallet, [ix], "buy ticket (USDC into the Pot)");
   }
 
-  private async potAccounts(id: number, nonce: bigint) {
+  private async potAccounts(id: number, nonce: bigint, mint: PublicKey) {
     const pot = await this.fetchPot(id, nonce);
-    const keys = [potPda(id, nonce), roomPda(id), ...(pot ? pot.wallets.slice(0, pot.n).map((w) => new PublicKey(w)) : [])];
-    return keys.map((pubkey, i) => ({ pubkey, isSigner: false, isWritable: i !== 1 }));
+    const potKey = potPda(id, nonce);
+    const metas = [
+      { pubkey: potKey, w: true }, { pubkey: roomPda(id), w: false }, { pubkey: ataOf(potKey, mint), w: true },
+      { pubkey: mint, w: false }, { pubkey: TOKEN_PROGRAM, w: false },
+      ...(pot ? pot.wallets.slice(0, pot.n).map((w) => ({ pubkey: ataOf(new PublicKey(w), mint), w: true })) : []),
+    ];
+    return metas.map((m) => ({ pubkey: m.pubkey, isSigner: false, isWritable: m.w }));
+  }
+
+  // ------------------------------------------------------------ Tip Line (Solana + rollup)
+
+  /** Spectator: stake `units` of USDC on heist `matchNo`'s Tip Line, naming this session key. */
+  async buyTip(wallet: InjectedWallet, id: number, matchNo: number, units: number, mint: PublicKey): Promise<string> {
+    const owner = wallet.publicKey!;
+    const market = marketPda(id, matchNo);
+    const ix = await this.program.methods
+      .buyTip(new BN(id), matchNo, new BN(units), this.pubkey)
+      .accountsPartial({
+        wallet: owner, walletAta: ataOf(owner, mint), room: roomPda(id), market, vault: ataOf(market, mint), mint,
+        tokenProgram: TOKEN_PROGRAM, ataProgram: ATA_PROGRAM, systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    return this.sendBase(wallet, [ix], "Tip Line: stake (USDC)");
+  }
+  /** Inside the rollup, signed by the session key the tip named: "seat N is the Mole". */
+  async pick(id: number, matchNo: number, seat: number) {
+    const ix = await this.program.methods.pick(seat).accountsPartial({ player: this.pubkey, room: roomPda(id) })
+      .remainingAccounts([{ pubkey: marketPda(id, matchNo), isSigner: false, isWritable: false }]).instruction();
+    return this.send([ix], `Tip Line: pick seat ${seat}`);
+  }
+  /** Permissionless fallback if the Magic Action didn't land (or a refund after 20 min). */
+  async recordTips(wallet: InjectedWallet, id: number, matchNo: number) {
+    const ix = await this.program.methods.recordTips(new BN(id), matchNo).accountsPartial({})
+      .remainingAccounts([
+        { pubkey: marketPda(id, matchNo), isSigner: false, isWritable: true },
+        { pubkey: roomPda(id), isSigner: false, isWritable: false },
+      ]).instruction();
+    return this.sendBase(wallet, [ix], "Tip Line: resolve from the committed Room");
+  }
+  async claimTip(wallet: InjectedWallet, id: number, matchNo: number, entry: number, entryWallet: PublicKey, mint: PublicKey) {
+    const market = marketPda(id, matchNo);
+    const ix = await this.program.methods.claimTip(new BN(id), matchNo, entry)
+      .accountsPartial({ market, vault: ataOf(market, mint), dest: ataOf(entryWallet, mint), mint, tokenProgram: TOKEN_PROGRAM })
+      .instruction();
+    return this.sendBase(wallet, [ix], "Tip Line: claim");
   }
   /** Permissionless fallback if the Magic Action didn't land: same payout, read from the committed Room. */
-  async settle(wallet: InjectedWallet, id: number, nonce: bigint) {
+  async settle(wallet: InjectedWallet, id: number, nonce: bigint, mint: PublicKey) {
     const ix = await this.program.methods.settle(new BN(id), new BN(nonce.toString()))
-      .accountsPartial({}).remainingAccounts(await this.potAccounts(id, nonce)).instruction();
+      .accountsPartial({}).remainingAccounts(await this.potAccounts(id, nonce, mint)).instruction();
     return this.sendBase(wallet, [ix], "settle the Pot on Solana");
   }
-  async refund(wallet: InjectedWallet, id: number, nonce: bigint) {
+  async refund(wallet: InjectedWallet, id: number, nonce: bigint, mint: PublicKey) {
     const ix = await this.program.methods.refund(new BN(id), new BN(nonce.toString()))
-      .accountsPartial({}).remainingAccounts(await this.potAccounts(id, nonce)).instruction();
+      .accountsPartial({}).remainingAccounts(await this.potAccounts(id, nonce, mint)).instruction();
     return this.sendBase(wallet, [ix], "refund the Pot");
   }
 
@@ -307,6 +382,7 @@ export class GameClient {
       .accountsPartial({
         payer: this.pubkey, room: roomPda(id), world: worldPda(id), oracleQueue: VRF_EPHEMERAL_QUEUE, magicProgram: MAGIC_PROGRAM,
         programIdentity: vrfIdentity(), vrfProgram: VRF_PROGRAM, slotHashes: SYSVAR_SLOT_HASHES_PUBKEY, systemProgram: SystemProgram.programId,
+        log: logPda(id), logPermission: permPda(logPda(id)), permissionProgram: PERMISSION_PROGRAM, ephemeralVault: EPHEMERAL_VAULT,
       })
       .remainingAccounts(Array.from({ length: MAXP }, (_, s) => ({ pubkey: viewPda(id, s), isSigner: false, isWritable: true })))
       .instruction();
@@ -334,8 +410,14 @@ export class GameClient {
     const ix = await this.program.methods.chat(bytes.length, arr).accountsPartial(this.actAccounts(id)).instruction();
     return this.send([ix], "chat");
   }
+  /** Push the Room (carrying the deal commitment) to Solana before play. Once per heist. */
+  async commitDeal(id: number) {
+    const ix = await this.program.methods.commitDeal()
+      .accountsPartial({ payer: this.pubkey, room: roomPda(id), magicProgram: MAGIC_PROGRAM, magicContext: MAGIC_CONTEXT }).instruction();
+    return this.send([ix], "commit the deal to Solana");
+  }
   async tick(id: number) {
-    const accs: Record<string, PublicKey> = { room: roomPda(id), world: worldPda(id) };
+    const accs: Record<string, PublicKey> = { room: roomPda(id), world: worldPda(id), log: logPda(id) };
     for (let s = 0; s < MAXP; s++) accs[`view${s}`] = viewPda(id, s);
     const ix = await this.program.methods.tick().accountsPartial(accs).instruction();
     return this.send([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }), ix], "tick (fallback)", { confirm: false });
@@ -345,6 +427,7 @@ export class GameClient {
     return {
       payer: this.pubkey, room: roomPda(id), world, worldPermission: permPda(world),
       permissionProgram: PERMISSION_PROGRAM, ephemeralVault: EPHEMERAL_VAULT, magicProgram: MAGIC_PROGRAM, magicContext: MAGIC_CONTEXT,
+      log: logPda(id), logPermission: permPda(logPda(id)),
     };
   }
   private viewPerms(id: number) {
@@ -360,7 +443,7 @@ export class GameClient {
     const rest = this.viewPerms(id);
     if (nonce !== 0n) rest.push({ pubkey: potPda(id, nonce), isSigner: false, isWritable: false });
     const ix = await this.program.methods.finish().accountsPartial(this.lightsAccounts(id)).remainingAccounts(rest).instruction();
-    return this.send([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 }), ix], nonce ? "lights on + commit + settle action" : "lights on (unseal)");
+    return this.send([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_200_000 }), ix], nonce ? "lights on: commit result + settle Pot" : "lights on: commit result to Solana");
   }
   async reset(id: number) {
     const ix = await this.program.methods.reset().accountsPartial(this.lightsAccounts(id)).remainingAccounts(this.viewPerms(id)).instruction();

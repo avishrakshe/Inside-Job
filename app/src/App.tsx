@@ -1,13 +1,14 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { verifyTeeRpcIntegrity } from "@magicblock-labs/ephemeral-rollups-sdk";
 import { GameClient, loadSessionKey, randomNonce, TxEvent } from "./chain/client";
-import { FAUCET_URL, ROOM_IDS, STAKED_ROOM_IDS, TEE_RPC } from "./chain/config";
+import { FAUCET_URL, ROOM_IDS, STAKED_ROOM_IDS, TEE_RPC, USDC_FAUCET_URL } from "./chain/config";
+import { PublicKey } from "@solana/web3.js";
 import { RoomState, PH, PHASE_NAME, occupied, MAXP, isEmptyKey } from "./chain/decode";
 import Landing, { LandingStats } from "./ui/Landing";
 import ChainLog from "./ui/ChainLog";
 import Avatar from "./ui/Avatar";
 import { sfx, isMuted, setMuted, onMute } from "./game/sfx";
-import { short, sol, useWallet, WalletState } from "./ui/wallet";
+import { short, usdc, useWallet, WalletState } from "./ui/wallet";
 import { trackEvent } from "./analytics";
 import { PhoneIntro, PhoneMenu } from "./ui/PhoneHome";
 import { goLandscape, useMedia, usePhone } from "./ui/phone";
@@ -192,8 +193,9 @@ export default function App() {
         throw new Error("This wallet already holds a ticket for this pot from another browser. Play from there.");
       }
       if (!pot || mine === null || mine < 0) {
-        setFlow({ roomId: id, step: 1, note: `Approve ${sol(r.stake)} SOL into the Pot (Solana devnet)` });
-        await client.buyTicket(ws.wallet, id, nonce);
+        setFlow({ roomId: id, step: 1, note: `Approve ${usdc(r.stake)} USDC into the Pot (Solana devnet)` });
+        if ((await client.tokenUnits(ws.pubkey, new PublicKey(r.mint))) < r.stake) throw new Error(`This table needs ${usdc(r.stake)} devnet USDC. Get some at faucet.circle.com (Solana Devnet), then try again.`);
+        await client.buyTicket(ws.wallet, id, nonce, new PublicKey(r.mint));
         w.refresh();
       }
       setFlow({ roomId: id, step: 2, note: "Taking your seat inside the TEE rollup…" });
@@ -235,7 +237,7 @@ export default function App() {
 
   const walletButton = w.wallet ? (
     <button className="badge walletbtn on" title="Devnet wallet (staked tables). Click to disconnect." onClick={() => w.disconnect()}>
-      ◎ {w.wallet.balance === null ? "…" : w.wallet.balance.toFixed(3)} · {short(w.wallet.pubkey.toBase58())}
+      ◎ {w.wallet.balance === null ? "…" : w.wallet.balance.toFixed(2)} · ${w.wallet.usdc === null ? "…" : w.wallet.usdc.toFixed(2)} · {short(w.wallet.pubkey.toBase58())}
     </button>
   ) : (
     <button className="badge walletbtn" onClick={() => w.connect().then((s) => trackEvent("wallet_connect", { wallet: s.name })).catch((e) => setErr(e?.message ?? String(e)))} title="Only needed for staked tables">
@@ -264,7 +266,8 @@ export default function App() {
   const stakedNote = (
     <>
       {!w.available && <p className="muted small">No wallet detected. Install Phantom or Solflare and switch it to <b>Devnet</b>. Need test SOL? <a href={FAUCET_URL} target="_blank" rel="noreferrer">faucet.solana.com</a></p>}
-      {w.wallet && (w.wallet.balance ?? 1) < 0.02 && <p className="muted small">Low on devnet SOL. Top up at <a href={FAUCET_URL} target="_blank" rel="noreferrer">faucet.solana.com</a> (wallet {short(w.wallet.pubkey.toBase58())}).</p>}
+      {w.wallet && (w.wallet.balance ?? 1) < 0.02 && <p className="muted small">Low on devnet SOL for fees. Top up at <a href={FAUCET_URL} target="_blank" rel="noreferrer">faucet.solana.com</a> (wallet {short(w.wallet.pubkey.toBase58())}).</p>}
+      <p className="muted small">Stakes are <b>devnet USDC</b> (free test tokens): <a href={USDC_FAUCET_URL} target="_blank" rel="noreferrer">faucet.circle.com</a> → Solana Devnet{w.wallet ? <> → {short(w.wallet.pubkey.toBase58())}</> : null}.</p>
     </>
   );
 
@@ -380,7 +383,7 @@ function CrewCard({ id, r, busy, onJoin, onWatch }: { id: number; r: RoomState |
         <b>{staked ? "TABLE" : "CREW"} #{id}</b>
         <span className={`phase-pill p${r.phase}`}>{PHASE_NAME[r.phase]}</span>
       </div>
-      {staked && <div className="stakechip">◎ {sol(r.stake)} SOL / seat{humans > 0 ? ` · pot ${sol(r.stake * humans)}` : ""}</div>}
+      {staked && <div className="stakechip">$ {usdc(r.stake)} USDC / seat{humans > 0 ? ` · pot ${usdc(r.stake * humans)}` : ""}</div>}
       <div className="cc-avatars">
         {seated.length === 0 && <span className="muted small">empty: be the first in</span>}
         {seated.map((i) => <Avatar key={i} seat={i} size={38} />)}
@@ -388,7 +391,7 @@ function CrewCard({ id, r, busy, onJoin, onWatch }: { id: number; r: RoomState |
       <div className="muted small">{humans}/{r.maxPlayers} agents · heist #{r.matchNo}</div>
       <div className="row">
         <button className={`btn ${staked ? "gold" : ""}`} disabled={!open || busy !== null} onClick={() => onJoin(r)}>
-          {busy === id ? "…" : open ? (staked ? `STAKE ${sol(r.stake)} & JOIN` : "JOIN") : "IN PROGRESS"}
+          {busy === id ? "…" : open ? (staked ? `STAKE ${usdc(r.stake)} USDC & JOIN` : "JOIN") : "IN PROGRESS"}
         </button>
         <button className="btn ghost" onClick={onWatch}>WATCH</button>
       </div>

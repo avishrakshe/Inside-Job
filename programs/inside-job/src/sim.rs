@@ -844,7 +844,7 @@ pub fn write_view(room: &Room, w: &World, i: usize, v: &mut View) {
 
 // ---------------------------------------------------------------- tests
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "replay")))]
 mod tests {
     use super::*;
     use bytemuck::Zeroable;

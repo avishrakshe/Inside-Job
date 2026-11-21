@@ -72,6 +72,65 @@ export interface VerifyReport {
 
 export const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 
+// ---------------------------------------------------------------- full replay (WASM)
+
+/**
+ * The program's own rule files (state.rs + sim.rs + replaylog.rs) compiled to WebAssembly
+ * (tools/replay). Not a port: the browser runs the exact code the TEE ran.
+ */
+export interface ReplayReport {
+  ok: boolean;
+  /** revealed seed matches the deal commitment the Room carried to Solana */
+  commit: boolean;
+  /** the move log's hash chain matches the one committed with the result */
+  chain: boolean;
+  /** first World field the replay disagrees with (null = identical) */
+  world: string | null;
+  /** first public-result field the replay disagrees with (null = identical) */
+  room: string | null;
+  error: string | null;
+  steps: number;
+  records: number;
+  winner: number;
+  logHash: string;
+  dealCommit: string;
+}
+
+let wasm: Promise<WebAssembly.Instance> | null = null;
+function loadReplay(): Promise<WebAssembly.Instance> {
+  if (!wasm) {
+    wasm = import("./replay.wasm?url").then(async ({ default: url }) => {
+      const bytes = await (await fetch(url)).arrayBuffer();
+      return (await WebAssembly.instantiate(bytes, {})).instance;
+    });
+    wasm.catch(() => { wasm = null; });
+  }
+  return wasm;
+}
+/** Node scripts: hand in the .wasm bytes yourself (no Vite). */
+export function useReplayBytes(bytes: ArrayBuffer | Uint8Array) {
+  wasm = WebAssembly.instantiate(bytes, {}).then((r) => r.instance);
+}
+
+/** Replay a revealed heist from its move log and check it against what was committed. */
+export async function verifyReplay(room: Uint8Array, world: Uint8Array, log: Uint8Array): Promise<ReplayReport> {
+  const inst = await loadReplay();
+  const ex = inst.exports as any;
+  const put = (b: Uint8Array) => {
+    const p = ex.ij_alloc(b.length) as number;
+    new Uint8Array((ex.memory as WebAssembly.Memory).buffer, p, b.length).set(b);
+    return p;
+  };
+  const pr = put(room), pw = put(world), pl = put(log);
+  const out = ex.ij_verify(pr, room.length, pw, world.length, pl, log.length) as number;
+  const len = ex.ij_out_len() as number;
+  const json = new TextDecoder().decode(new Uint8Array((ex.memory as WebAssembly.Memory).buffer, out, len));
+  return JSON.parse(json);
+}
+
+/** The deal commitment as Solana holds it (from the base-layer Room) vs the revealed one. */
+export const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 export async function verifyDeal(room: RoomState, world: WorldState): Promise<VerifyReport> {
   const mixed = await mixSeed(world.vrf, world.salts, room.roomId, room.matchNo);
   const seedOk = hex(mixed) === hex(world.seed);

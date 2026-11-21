@@ -26,11 +26,52 @@ export interface RoomState {
   chat: { seat: number; text: string; n: number }[];
   /** staked tables: the base-layer Pot this heist plays for (0n = none yet) */
   potNonce: bigint;
-  /** lamports per seat; 0 = free table */
+  /** token base units (USDC: 6 decimals) per seat; 0 = free table */
   stake: number;
+  /** the SPL mint stakes and tips are paid in (devnet USDC) */
+  mint: string;
+  /** H("inside-job/commit/v1" ‖ seed ‖ room ‖ heist), pushed to Solana before play */
+  dealCommit: Uint8Array;
+  /** running SHA-256 of the move log; committed to Solana with the result */
+  logHash: Uint8Array;
+  logLen: number;
+  dealCommitted: number;
+  /** Tip Line: picks so far (index = Market entry) */
+  tipN: number;
+  tipSeat: number[];
+  tipWeight: number[];
 }
 
-export const ROOM_SIZE = 1632;
+export const ROOM_SIZE = 1784;
+export const MAX_TIPS = 16;
+export const NO_PICK = 255;
+export const MARKET_OPEN = 0, MARKET_RESOLVED = 1, MARKET_REFUNDED = 2;
+export interface MarketState {
+  roomId: number; createdAt: number; matchNo: number; status: number; n: number; winner: number;
+  wallets: string[]; sessions: string[]; amounts: number[]; seats: number[]; weights: number[]; roles: number[]; paid: number[]; claimed: number;
+}
+
+/** Borsh layout of `Market` (state.rs): fields in declaration order, no padding. */
+export function decodeMarket(raw: Uint8Array): MarketState {
+  const d = raw.subarray(DISC);
+  const v = new DataView(d.buffer, d.byteOffset, d.byteLength);
+  const key = (o: number) => new PublicKey(d.subarray(o, o + 32)).toBase58();
+  const T = MAX_TIPS;
+  // room_id 0, created_at 8, match_no 16, status 20, n 21, bump 22, winner 23
+  const W = 24, S = W + 32 * T, A = S + 32 * T, SE = A + 8 * T, WE = SE + T, R = WE + 2 * T, P = R + MAXP, C = P + 8 * T;
+  return {
+    roomId: Number(v.getBigUint64(0, true)), createdAt: Number(v.getBigInt64(8, true)), matchNo: v.getUint32(16, true),
+    status: d[20], n: d[21], winner: d[23],
+    wallets: Array.from({ length: T }, (_, i) => key(W + i * 32)),
+    sessions: Array.from({ length: T }, (_, i) => key(S + i * 32)),
+    amounts: Array.from({ length: T }, (_, i) => Number(v.getBigUint64(A + i * 8, true))),
+    seats: Array.from(d.subarray(SE, SE + T)),
+    weights: Array.from({ length: T }, (_, i) => v.getUint16(WE + i * 2, true)),
+    roles: Array.from(d.subarray(R, R + MAXP)),
+    paid: Array.from({ length: T }, (_, i) => Number(v.getBigUint64(P + i * 8, true))),
+    claimed: v.getUint16(C, true),
+  };
+}
 export const POT_OPEN = 0, POT_SETTLED = 1, POT_REFUNDED = 2;
 export interface PotState {
   roomId: number; nonce: bigint; stake: number; createdAt: number; status: number; n: number; winner: number;
@@ -97,6 +138,13 @@ export function decodeRoom(raw: Uint8Array): RoomState {
     chat,
     potNonce: d.byteLength >= 1632 ? v.getBigUint64(1616, true) : 0n,
     stake: d.byteLength >= 1632 ? Number(v.getBigUint64(1624, true)) : 0,
+    ...(d.byteLength >= ROOM_SIZE
+      ? {
+          mint: key(1632), dealCommit: d.slice(1664, 1696), logHash: d.slice(1696, 1728), logLen: u32(1728),
+          dealCommitted: d[1732], tipN: d[1733], tipSeat: u8s(d, 1736, MAX_TIPS),
+          tipWeight: Array.from({ length: MAX_TIPS }, (_, i) => v.getUint16(1752 + i * 2, true)),
+        }
+      : { mint: ZERO, dealCommit: new Uint8Array(32), logHash: new Uint8Array(32), logLen: 0, dealCommitted: 0, tipN: 0, tipSeat: new Array(MAX_TIPS).fill(NO_PICK), tipWeight: new Array(MAX_TIPS).fill(0) }),
   };
 }
 

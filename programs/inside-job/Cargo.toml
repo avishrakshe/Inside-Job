@@ -18,11 +18,14 @@ idl-build = ["anchor-lang/idl-build"]
 custom-heap = []
 custom-panic = []
 anchor-debug = []
+# Never enable on the program: tools/replay compiles state.rs/sim.rs/replaylog.rs to WASM
+# with it (plain Pod structs, no Anchor), so the browser replays with the same code.
+replay = []
 
 [dependencies]
 anchor-lang = { version = "1.0.2", features = ["init-if-needed"] }
 ephemeral-rollups-sdk = { version = "=0.17.3", features = ["anchor", "access-control", "vrf", "crank"] }
-bytemuck = { version = "1.16", features = ["derive", "min_const_generics"] }
+bytemuck = { version = "1.16", features = ["derive", "min_const_generics", "extern_crate_alloc"] }
 solana-sha256-hasher = "3.1"
 
 [dev-dependencies]

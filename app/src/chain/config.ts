@@ -15,11 +15,19 @@ export const VRF_EPHEMERAL_QUEUE = new PublicKey("5hBR571xnXppuCPveTrctfTU7tJLSN
 export const EPHEMERAL_VAULT = new PublicKey("MagicVau1t999999999999999999999999999999999");
 export const MAGIC_PROGRAM = new PublicKey("Magic11111111111111111111111111111111111111");
 export const MAGIC_CONTEXT = new PublicKey("MagicContext1111111111111111111111111111111");
-/** The public room pool: free tables (guest play, no wallet). */
-export const ROOM_IDS: number[] = get("ROOM_IDS", "11,12,13,14").split(",").map((s: string) => Number(s.trim()));
-/** Staked tables: every seat pays the table's stake into a Solana Pot; winners split it. */
-export const STAKED_ROOM_IDS: number[] = get("STAKED_ROOM_IDS", "21,22").split(",").map((s: string) => Number(s.trim())).filter(Boolean);
+/** The public room pool: free tables (guest play, no wallet). v2 rooms (replay + Tip Line). */
+export const ROOM_IDS: number[] = get("ROOM_IDS", "31,32,33,34").split(",").map((s: string) => Number(s.trim()));
+/** Staked tables: every seat pays the table's stake (USDC) into a Solana Pot; winners split it. */
+export const STAKED_ROOM_IDS: number[] = get("STAKED_ROOM_IDS", "41,42").split(",").map((s: string) => Number(s.trim())).filter(Boolean);
+/** Circle's devnet USDC: stakes and Tip Line entries. */
+export const USDC_MINT = new PublicKey(get("USDC_MINT", "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"));
+export const USDC_DECIMALS = 6;
+export const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+export const ATA_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 export const FAUCET_URL = "https://faucet.solana.com";
+export const USDC_FAUCET_URL = "https://faucet.circle.com";
+/** Base-layer explorer link for an account (Solana devnet). */
+export const explorerBase = (a: string) => `https://explorer.solana.com/address/${a}?cluster=devnet`;
 
 export const explorerTx = (sig: string, onTee = true) =>
   onTee

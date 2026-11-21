@@ -4,12 +4,14 @@
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { utils } from "@coral-xyz/anchor";
 import { PROGRAM_ID, TEE_RPC } from "../src/chain/config";
-import { GameClient, roomPda, viewPda, worldPda } from "../src/chain/client";
+import fs from "node:fs";
+import { GameClient, logPda, roomPda, viewPda, worldPda } from "../src/chain/client";
 import { PH, PHASE_NAME, ROLE_MOLE, occupied } from "../src/chain/decode";
-import { verifyDeal } from "../src/chain/verify";
+import { hex, sameBytes, useReplayBytes, verifyDeal, verifyReplay } from "../src/chain/verify";
 import { log, sleep } from "./common";
 
-const roomId = Number(process.argv[2] ?? 14);
+useReplayBytes(fs.readFileSync(new URL("../src/chain/replay.wasm", import.meta.url)));
+const roomId = Number(process.argv[2] ?? 34);
 const results: [string, boolean, string][] = [];
 const check = (name: string, ok: boolean, note = "") => {
   results.push([name, ok, note]);
@@ -135,6 +137,16 @@ async function main() {
   const v0 = (await me.fetchView(roomId, seat))!;
   check("my View holds my role", v0.role === 0 || v0.role === 1, v0.role === ROLE_MOLE ? "I am the Mole" : "I am crew");
 
+  // the deal commitment goes to Solana while everything is still sealed
+  await me.commitDeal(roomId).catch((e) => log("  commit_deal:", String(e?.message ?? e).slice(0, 80)));
+  const baseDeal = await waitFor(async () => {
+    const b = await me.fetchBaseRoom(roomId);
+    return b && b.matchNo === room.matchNo && sameBytes(b.dealCommit, room.dealCommit) ? b : null;
+  }, 60_000, "deal commitment on Solana").catch(() => null);
+  check("the deal commitment is on Solana before play", !!baseDeal && !room.dealCommit.every((x) => x === 0), hex(room.dealCommit).slice(0, 16));
+  const lg = await stranger.tryRead(logPda(roomId));
+  check("stranger is refused the sealed move log", !lg.ok, lg.note);
+
   const w = await stranger.tryRead(worldPda(roomId));
   const w2 = await me.tryRead(worldPda(roomId));
   const ov = await me.tryRead(viewPda(roomId, (seat + 1) % 8));
@@ -180,6 +192,19 @@ async function main() {
   const rep = await verifyDeal(revealed, world);
   check("seed = sha256(vrf || salts || room || heist)", rep.seedOk, rep.seedHex.slice(0, 16));
   check("replayed shuffle == revealed roles", rep.rolesOk, "");
+
+  // replay the whole heist with the program's own rules (WASM) and check every commitment
+  const raw = (await stranger.fetchRevealed(roomId))!;
+  const rp = await verifyReplay(raw.room, raw.world, raw.log);
+  check("the move log is public after lights-on", raw.log.length > 100, `${rp.records} records over ${rp.steps} steps`);
+  check("WASM replay rebuilds the exact revealed World + result", rp.ok, rp.ok ? "" : JSON.stringify(rp));
+  check("revealed seed matches the deal commitment", rp.commit, rp.dealCommit.slice(0, 16));
+  check("move log hash chain matches the Room's", rp.chain, rp.logHash.slice(0, 16));
+  const baseEnd = await waitFor(async () => {
+    const b = await me.fetchBaseRoom(roomId);
+    return b && b.matchNo === revealed.matchNo && b.phase >= PH.ENDED ? b : null;
+  }, 90_000, "result commit on Solana").catch(() => null);
+  check("Solana holds the same result + log hash (free table commit)", !!baseEnd && sameBytes(baseEnd.logHash, revealed.logHash) && baseEnd.winner === revealed.winner, baseEnd ? `winner ${baseEnd.winner}` : "not landed");
 
   await me.reset(roomId);
   const back = (await me.fetchRoom(roomId))!;

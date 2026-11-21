@@ -3,7 +3,8 @@ import { GameClient, potPda } from "../chain/client";
 import { explorerAddr } from "../chain/config";
 import { POT_OPEN, POT_REFUNDED, POT_SETTLED, PotState, RoomState } from "../chain/decode";
 import { SEAT_COLORS } from "../game/render";
-import { short, sol, WalletState } from "./wallet";
+import { PublicKey } from "@solana/web3.js";
+import { short, usdc, WalletState } from "./wallet";
 
 const REFUND_AFTER = 20 * 60;
 
@@ -36,8 +37,8 @@ export function PotPanel({ client, room, wallet, onConnectWallet }: { client: Ga
     setBusy(kind);
     try {
       const ws = wallet ?? (await onConnectWallet());
-      if (kind === "settle") await client.settle(ws.wallet, room.roomId, nonce);
-      else await client.refund(ws.wallet, room.roomId, nonce);
+      if (kind === "settle") await client.settle(ws.wallet, room.roomId, nonce, new PublicKey(room.mint));
+      else await client.refund(ws.wallet, room.roomId, nonce, new PublicKey(room.mint));
       const p = await client.fetchPot(room.roomId, nonce);
       if (p) setPot(p);
     } catch (e: any) {
@@ -55,7 +56,7 @@ export function PotPanel({ client, room, wallet, onConnectWallet }: { client: Ga
   const seatOf = (w: string) => room.wallets.indexOf(w);
   return (
     <div className={`proofcard potpanel s${pot.status}`}>
-      <h3>💰 The pot: {sol(total)} SOL</h3>
+      <h3>💰 The pot: {usdc(total)} USDC</h3>
       <div className={`check ${pot.status === POT_SETTLED ? "ok" : pot.status === POT_REFUNDED ? "" : "wait"}`}>
         {pot.status === POT_SETTLED && <>✓ Paid out on Solana from the sealed result: no oracle, no admin</>}
         {pot.status === POT_REFUNDED && <>↩ Refunded to every ticket</>}
@@ -71,7 +72,7 @@ export function PotPanel({ client, room, wallet, onConnectWallet }: { client: Ga
               <span className="dotc" style={{ background: s >= 0 ? SEAT_COLORS[s] : "#666" }} />
               <span>{s >= 0 ? room.names[s] : "unseated"} <span className="mono tiny muted">{short(w)}</span>{w === me && <span className="tag">YOU</span>}</span>
               <span className={`mono ${pot.status === POT_OPEN ? "muted" : delta > 0 ? "up" : delta < 0 ? "down" : ""}`}>
-                {pot.status === POT_OPEN ? `staked ${sol(pot.stake)}` : `${delta > 0 ? "+" : ""}${sol(delta)} SOL`}
+                {pot.status === POT_OPEN ? `staked ${usdc(pot.stake)}` : `${delta > 0 ? "+" : ""}${usdc(delta)} USDC`}
               </span>
             </div>
           );

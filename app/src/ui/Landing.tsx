@@ -291,7 +291,7 @@ export default function Landing(p: Props) {
         <div data-reveal>{p.freeTables}</div>
         <div className="lp-sechead" id="stakes" style={{ marginTop: 56 }} data-reveal>
           <div>
-            <div className="lp-kicker gold">08 · HIGH STAKES · DEVNET SOL</div>
+            <div className="lp-kicker gold">08 · HIGH STAKES · DEVNET USDC</div>
             <h2 className="lp-h2">Winners split the pot.</h2>
           </div>
           <p>Buy a ticket on Solana, play sealed in the TEE. At lights-on the rollup commits the result and a Magic Action pays the winners. No oracle, no house cut, and anyone can refund a stuck pot.</p>
@@ -789,7 +789,7 @@ function ProofTerm() {
   }, [seen]);
   return (
     <div className="lp-term" ref={ref}>
-      <div className="mono muted">$ npx tsx scripts/e2e.ts 14 && npx tsx scripts/e2e-stake.ts 21</div>
+      <div className="mono muted">$ npx tsx scripts/e2e.ts 34 && npx tsx scripts/e2e-stake.ts 41</div>
       {PROOF.slice(0, k).map((l) => <div key={l} className="tline"><span className="pass">PASS</span> {l}</div>)}
       {k < PROOF.length && <div className="tline"><span className="dlg-caret">▌</span></div>}
     </div>

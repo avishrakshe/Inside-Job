@@ -2,7 +2,43 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram, TransactionInstruction } from "@solana/web3.js";
+import { ATA_PROGRAM, TOKEN_PROGRAM } from "../src/chain/config";
+import { ataOf } from "../src/chain/client";
+
+/** Associated Token Account `CreateIdempotent` (hand-encoded, no spl-token dependency). */
+export function createAtaIx(payer: PublicKey, owner: PublicKey, mint: PublicKey): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: ATA_PROGRAM,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: ataOf(owner, mint), isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([1]),
+  });
+}
+
+/** spl-token `TransferChecked` between two owners' ATAs. */
+export function transferIx(from: PublicKey, to: PublicKey, mint: PublicKey, units: number, decimals: number): TransactionInstruction {
+  const data = Buffer.alloc(10);
+  data[0] = 12;
+  data.writeBigUInt64LE(BigInt(units), 1);
+  data[9] = decimals;
+  return new TransactionInstruction({
+    programId: TOKEN_PROGRAM,
+    keys: [
+      { pubkey: ataOf(from, mint), isSigner: false, isWritable: true },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: ataOf(to, mint), isSigner: false, isWritable: true },
+      { pubkey: from, isSigner: true, isWritable: false },
+    ],
+    data,
+  });
+}
 
 /** The deployer/admin keypair. Defaults to the WSL Solana CLI wallet. */
 export function loadAdmin(): Keypair {

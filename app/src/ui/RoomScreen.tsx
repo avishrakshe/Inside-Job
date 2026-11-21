@@ -11,7 +11,9 @@ import TaskPanel from "./TaskPanel";
 import { LobbyStage } from "./Scenes";
 import { Chat, CheatConsole, SealMatrix, VerifyBox } from "./Proof";
 import { PotPanel } from "./Pot";
-import { WalletState, sol } from "./wallet";
+import { WalletState, usdc } from "./wallet";
+import { DealLock, ReplayCheck } from "./Trust";
+import { TipLinePanel, TipResults } from "./TipLine";
 import { trackEvent } from "../analytics";
 import ChainLog from "./ChainLog";
 import type { TxEvent } from "../chain/client";
@@ -96,6 +98,14 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
       setReport(null);
     }
   }, [phase, seated, seat, client, roomId]);
+
+  // ---- once dealt, push the deal commitment to Solana (any seated client; first one wins)
+  const dealCommitted = room?.dealCommitted ?? 1;
+  useEffect(() => {
+    if (!seated || phase !== PH.PLAY || dealCommitted) return;
+    const t = setTimeout(() => client.commitDeal(roomId).catch(() => {}), 800 + seat * 900);
+    return () => clearTimeout(t);
+  }, [seated, phase, dealCommitted, seat, client, roomId]);
 
   // ---- fresh sealed salt each time we're back in the lobby
   const saltFor = useRef(-1);
@@ -209,7 +219,8 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
         {room.phase === PH.STARTING && <Dealing room={room} canFallback={seated} onFallback={() => client.fallbackDeal(roomId).catch(() => {})} />}
         {room.phase >= PH.PLAY && (
           <GameView client={client} room={room} view={view} seat={seat} seated={seated} roomId={roomId} world={world}
-            onLeave={leave} onProof={() => setDrawer((d) => !d)} blocked={roleShow || splash || cuffed} isTouch={touch} />
+            onLeave={leave} onProof={() => setDrawer((d) => !d)} blocked={roleShow || splash || cuffed} isTouch={touch}
+            wallet={wallet} onConnectWallet={onConnectWallet} />
         )}
         {room.phase === PH.MEETING && !splash && <MeetingScreen client={client} room={room} view={view} seat={seat} seated={seated} roomId={roomId} />}
         {room.phase === PH.RESULT && <EjectScene room={room} since={resultSince || Date.now()} />}
@@ -217,8 +228,10 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
           <EndScreen room={room} seat={seated ? seat : -1} phase={room.phase} onHide={() => setEndHidden(true)}>
             {room.phase === PH.REVEALED && (
               <div className="end-actions">
+                <ReplayCheck client={client} room={room} />
                 <VerifyBox room={room} report={report} />
                 {room.stake > 0 && room.potNonce !== 0n && <PotPanel client={client} room={room} wallet={wallet} onConnectWallet={onConnectWallet} />}
+                {room.tipN > 0 && <TipResults client={client} room={room} wallet={wallet} onConnectWallet={onConnectWallet} />}
                 <div className="row center">
                   {seated && <NextHeist client={client} roomId={roomId} />}
                   <button className="btn ghost" onClick={leave}>Leave crew</button>
@@ -238,6 +251,8 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
           <div className="drawer">
             <div className="drawer-head"><b>PROOF</b><button className="xbtn" onClick={() => setDrawer(false)}>✕</button></div>
             <SealMatrix />
+            {room.phase >= PH.PLAY && room.phase < PH.REVEALED && <DealLock client={client} room={room} />}
+            {room.phase === PH.REVEALED && <ReplayCheck client={client} room={room} />}
             <CheatConsole client={client} roomId={roomId} seat={seated ? seat : -1} />
             {room.phase === PH.REVEALED && <VerifyBox room={room} report={report} />}
             <ChainLog txs={txs} totals={txTotals} inline />
@@ -301,7 +316,7 @@ function LobbyScreen({ client, room, seat, seated, roomId, onLeave, onProof, tou
           <div className="count"><b>{count}</b>/{room.maxPlayers}</div>
           {room.stake > 0 && (
             <div className="potbadge" title="Every human seat staked this into the Pot on Solana. Winners split it at lights-on.">
-              ◎ POT <b>{sol(room.stake * room.nHumans)}</b> SOL<small>{sol(room.stake)} / seat</small>
+              $ POT <b>{usdc(room.stake * room.nHumans)}</b> USDC<small>{usdc(room.stake)} / seat</small>
             </div>
           )}
           {isHost ? (
@@ -354,9 +369,10 @@ function LobbyScreen({ client, room, seat, seated, roomId, onLeave, onProof, tou
 
 // ------------------------------------------------------------------ the heist
 
-function GameView({ client, room, view, seat, seated, roomId, world, onLeave, onProof, blocked, isTouch }: {
+function GameView({ client, room, view, seat, seated, roomId, world, onLeave, onProof, blocked, isTouch, wallet, onConnectWallet }: {
   client: GameClient; room: RoomState; view: ViewState | null; seat: number; seated: boolean; roomId: number; world: WorldState | null;
   onLeave: () => void; onProof: () => void; blocked: boolean; isTouch: boolean;
+  wallet: WalletState | null; onConnectWallet: () => Promise<WalletState>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const keys = useRef<Record<string, boolean>>({});
@@ -534,6 +550,7 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
           <VaultBar room={room} />
           {seated && view && (view.role === ROLE_CREW || view.role === ROLE_MOLE) && <TaskList view={view} room={room} />}
           {!seated && <div className="hudcard"><b>SPECTATING</b><div className="muted small">Positions are sealed in the enclave until lights-on. You see only the public Room.</div></div>}
+          {!seated && <TipLinePanel client={client} room={room} wallet={wallet} onConnectWallet={onConnectWallet} />}
         </div>
       </div>
       <div className="hud-tr">

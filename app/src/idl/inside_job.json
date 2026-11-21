@@ -51,9 +51,9 @@
     {
       "name": "buy_ticket",
       "docs": [
-        "Staked tables: pay `stake` into this heist's Pot on Solana and name the session key",
-        "that may use the ticket to take a seat in the rollup. The Pot is plain base-layer",
-        "state (never delegated), so the money never leaves Solana."
+        "Staked tables: pay `stake` (USDC) into this heist's Pot on Solana and name the",
+        "session key that may use the ticket to take a seat in the rollup. The Pot is plain",
+        "base-layer state (never delegated), so the money never leaves Solana."
       ],
       "discriminator": [
         11,
@@ -70,6 +70,10 @@
           "name": "wallet",
           "writable": true,
           "signer": true
+        },
+        {
+          "name": "wallet_ata",
+          "writable": true
         },
         {
           "name": "room",
@@ -116,6 +120,21 @@
           }
         },
         {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "ata_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
         }
@@ -127,6 +146,118 @@
         },
         {
           "name": "nonce",
+          "type": "u64"
+        },
+        {
+          "name": "session",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "buy_tip",
+      "docs": [
+        "Spectators: stake `amount` (USDC) on this heist's Tip Line and name the session key",
+        "that will make your pick inside the rollup. One entry per wallet per heist."
+      ],
+      "discriminator": [
+        161,
+        13,
+        192,
+        175,
+        219,
+        54,
+        240,
+        170
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "wallet_ata",
+          "writable": true
+        },
+        {
+          "name": "room",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "room_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "market",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "room_id"
+              },
+              {
+                "kind": "arg",
+                "path": "match_no"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "ata_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "room_id",
+          "type": "u64"
+        },
+        {
+          "name": "match_no",
+          "type": "u32"
+        },
+        {
+          "name": "amount",
           "type": "u64"
         },
         {
@@ -182,10 +313,142 @@
       ]
     },
     {
+      "name": "claim_tip",
+      "docs": [
+        "Pay one Tip Line entry what it's owed, into its wallet's token account. Permissionless."
+      ],
+      "discriminator": [
+        27,
+        187,
+        52,
+        177,
+        137,
+        114,
+        24,
+        113
+      ],
+      "accounts": [
+        {
+          "name": "market",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "room_id"
+              },
+              {
+                "kind": "arg",
+                "path": "match_no"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "dest",
+          "writable": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "room_id",
+          "type": "u64"
+        },
+        {
+          "name": "match_no",
+          "type": "u32"
+        },
+        {
+          "name": "entry",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "commit_deal",
+      "docs": [
+        "Push the Room (now carrying `deal_commit`) to Solana before the heist gets going, so",
+        "the deal is on the base layer while it's still sealed. Anyone may call it, once per",
+        "heist. At lights-on anyone checks the revealed seed against this commitment."
+      ],
+      "discriminator": [
+        106,
+        70,
+        137,
+        59,
+        126,
+        4,
+        211,
+        152
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "create_room",
       "docs": [
         "Create a room and pre-fund it: its lamports follow it into the rollup and pay",
-        "for the sealed accounts and their permissions there."
+        "for the sealed accounts and their permissions there.",
+        "`mint` is the SPL token stakes and tips are paid in (devnet USDC); `stake` is in its",
+        "base units per seat (0 = free table; free tables still run a Tip Line in `mint`)."
       ],
       "discriminator": [
         130,
@@ -245,6 +508,10 @@
         {
           "name": "stake",
           "type": "u64"
+        },
+        {
+          "name": "mint",
+          "type": "pubkey"
         }
       ]
     },
@@ -526,10 +793,11 @@
     {
       "name": "finish",
       "docs": [
-        "Lights on: World and every View flip to public, so anyone can replay the deal",
-        "(VRF + salts) and check every role. remaining: [view_i, view_perm_i] x 8 (+ the Pot).",
-        "Staked tables: the Room is committed to Solana with a post-commit Magic Action that",
-        "runs `settle` there, so the payout happens in the same flow as the reveal."
+        "Lights on: World, every View and the move log flip to public, so anyone can check",
+        "the deal (VRF + salts) and replay the whole heist. remaining: [view_i, view_perm_i] x 8",
+        "(+ the Pot on staked tables). Every heist's final Room — winner, roles, deal",
+        "commitment, log hash — is committed to Solana, with Magic Actions that resolve the",
+        "Tip Line and pay the Pot there, in the same flow as the reveal."
       ],
       "discriminator": [
         67,
@@ -593,6 +861,14 @@
           "name": "magic_context",
           "writable": true,
           "address": "MagicContext1111111111111111111111111111111"
+        },
+        {
+          "name": "log",
+          "writable": true
+        },
+        {
+          "name": "log_permission",
+          "writable": true
         }
       ],
       "args": []
@@ -777,6 +1053,41 @@
       ]
     },
     {
+      "name": "pick",
+      "docs": [
+        "Tip Line: call who the Mole is (spectators only). Signed by the session key the",
+        "tip named; remaining account 0 is the base-layer Market, read inside the rollup.",
+        "Weight = heist time left, so an early call is worth more. Re-picking is allowed but",
+        "resets the weight to now. Closed once the heist ends; dead seats can't be picked."
+      ],
+      "discriminator": [
+        245,
+        194,
+        203,
+        3,
+        198,
+        81,
+        178,
+        103
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "seat",
+          "type": "u8"
+        }
+      ]
+    },
+    {
       "name": "process_undelegation",
       "discriminator": [
         196,
@@ -882,6 +1193,38 @@
       ]
     },
     {
+      "name": "record_tips",
+      "docs": [
+        "Resolve a heist's Tip Line from the committed Room: copies every pick, the roles and",
+        "the winner, and computes each entry's payout. Runs as a Magic Action right after the",
+        "lights-on commit; permissionless while the committed Room is still this heist.",
+        "Never resolvable (heist abandoned, commit lost)? 20 minutes after the first tip the",
+        "same call turns the Tip Line into full refunds instead.",
+        "remaining accounts (any order): the Market, the Room."
+      ],
+      "discriminator": [
+        90,
+        204,
+        242,
+        43,
+        134,
+        19,
+        190,
+        252
+      ],
+      "accounts": [],
+      "args": [
+        {
+          "name": "room_id",
+          "type": "u64"
+        },
+        {
+          "name": "match_no",
+          "type": "u32"
+        }
+      ]
+    },
+    {
       "name": "refund",
       "docs": [
         "Never settled (crank died, nobody started, commit lost)? After 20 minutes anyone can",
@@ -976,6 +1319,14 @@
           "name": "magic_context",
           "writable": true,
           "address": "MagicContext1111111111111111111111111111111"
+        },
+        {
+          "name": "log",
+          "writable": true
+        },
+        {
+          "name": "log_permission",
+          "writable": true
         }
       ],
       "args": []
@@ -1028,7 +1379,8 @@
         "schedules at lights-on, right after it commits the Room. It is also permissionless:",
         "the outcome is read from the committed Room, so a direct call pays exactly the same.",
         "No oracle and no admin: the result was sealed program state all along.",
-        "remaining accounts (any order): the Pot, the Room, every ticket holder's wallet."
+        "remaining accounts (any order): the Pot, the Room, the Pot's token account, the mint,",
+        "the token program, every ticket holder's token account."
       ],
       "discriminator": [
         175,
@@ -1055,7 +1407,9 @@
     {
       "name": "setup_core",
       "docs": [
-        "Create the sealed World (zero readers) and make the Room publicly readable."
+        "Create the sealed World (zero readers), the sealed move log, and make the Room",
+        "publicly readable. Call again until it's a no-op: each later call grows the move",
+        "log by up to 10 KiB (one CPI realloc) toward its full size."
       ],
       "discriminator": [
         136,
@@ -1104,6 +1458,14 @@
         },
         {
           "name": "room_permission",
+          "writable": true
+        },
+        {
+          "name": "log",
+          "writable": true
+        },
+        {
+          "name": "log_permission",
           "writable": true
         },
         {
@@ -1272,6 +1634,23 @@
           "address": "Magic11111111111111111111111111111111111111"
         },
         {
+          "name": "log",
+          "writable": true
+        },
+        {
+          "name": "log_permission",
+          "writable": true
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
           "name": "program_identity",
           "pda": {
             "seeds": [
@@ -1371,6 +1750,10 @@
         {
           "name": "view7",
           "writable": true
+        },
+        {
+          "name": "log",
+          "writable": true
         }
       ],
       "args": []
@@ -1413,6 +1796,19 @@
     }
   ],
   "accounts": [
+    {
+      "name": "Market",
+      "discriminator": [
+        219,
+        190,
+        213,
+        55,
+        0,
+        227,
+        198,
+        154
+      ]
+    },
     {
       "name": "Pot",
       "discriminator": [
@@ -1545,14 +1941,187 @@
       "code": 6020,
       "name": "MissingWallet",
       "msg": "a wallet account is missing"
+    },
+    {
+      "code": 6021,
+      "name": "BadMint",
+      "msg": "wrong token mint, or not an SPL token account"
+    },
+    {
+      "code": 6022,
+      "name": "TipRange",
+      "msg": "tip must be between 0.1 and 5 USDC"
+    },
+    {
+      "code": 6023,
+      "name": "MarketFull",
+      "msg": "the Tip Line for this heist is full"
+    },
+    {
+      "code": 6024,
+      "name": "MarketClosed",
+      "msg": "the Tip Line for this heist is closed"
+    },
+    {
+      "code": 6025,
+      "name": "DuplicateTip",
+      "msg": "this wallet already tipped this heist"
+    },
+    {
+      "code": 6026,
+      "name": "NoTip",
+      "msg": "no tip for this session key (or the rollup hasn't seen it yet; retry)"
+    },
+    {
+      "code": 6027,
+      "name": "Insider",
+      "msg": "players in this crew can't tip on it"
+    },
+    {
+      "code": 6028,
+      "name": "BadPick",
+      "msg": "pick a living seat in this heist"
+    },
+    {
+      "code": 6029,
+      "name": "NotResolved",
+      "msg": "the Tip Line hasn't been resolved yet"
+    },
+    {
+      "code": 6030,
+      "name": "AlreadyClaimed",
+      "msg": "already paid"
+    },
+    {
+      "code": 6031,
+      "name": "AlreadyCommitted",
+      "msg": "the deal is already committed"
     }
   ],
   "types": [
     {
+      "name": "Market",
+      "docs": [
+        "The Tip Line for one heist: spectators stake on which seat is the Mole. Base-layer",
+        "escrow (tokens in the Market's ATA). Picks are made inside the rollup and land in the",
+        "Room; at lights-on a Magic Action copies the committed result here. No oracle."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "room_id",
+            "type": "u64"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "match_no",
+            "type": "u32"
+          },
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "n",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "winner",
+            "docs": [
+              "winning team, copied from the committed Room (255 = unresolved)"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "wallets",
+            "type": {
+              "array": [
+                "pubkey",
+                16
+              ]
+            }
+          },
+          {
+            "name": "sessions",
+            "docs": [
+              "the session key that may pick for each entry inside the rollup"
+            ],
+            "type": {
+              "array": [
+                "pubkey",
+                16
+              ]
+            }
+          },
+          {
+            "name": "amounts",
+            "type": {
+              "array": [
+                "u64",
+                16
+              ]
+            }
+          },
+          {
+            "name": "seats",
+            "type": {
+              "array": [
+                "u8",
+                16
+              ]
+            }
+          },
+          {
+            "name": "weights",
+            "type": {
+              "array": [
+                "u16",
+                16
+              ]
+            }
+          },
+          {
+            "name": "roles",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "paid",
+            "type": {
+              "array": [
+                "u64",
+                16
+              ]
+            }
+          },
+          {
+            "name": "claimed",
+            "docs": [
+              "bit e set once entry e has been paid"
+            ],
+            "type": "u16"
+          }
+        ]
+      }
+    },
+    {
       "name": "Pot",
       "docs": [
         "Base-layer escrow for one staked heist. Never delegated: it lives on Solana and is",
-        "paid out by `settle`, which reads the Room state the TEE committed at lights-on."
+        "paid out by `settle`, which reads the Room state the TEE committed at lights-on.",
+        "The stakes themselves sit in the Pot's token account (an ATA of the Pot PDA)."
       ],
       "type": {
         "kind": "struct",
@@ -1896,9 +2465,91 @@
           {
             "name": "stake",
             "docs": [
-              "lamports per seat; 0 = free table"
+              "token base units (USDC: 6 decimals) per seat; 0 = free table"
             ],
             "type": "u64"
+          },
+          {
+            "name": "mint",
+            "docs": [
+              "the SPL mint stakes and tips are paid in (devnet USDC)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "deal_commit",
+            "docs": [
+              "H(\"inside-job/commit/v1\" ‖ seed ‖ room ‖ heist): pushed to Solana before play"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "log_hash",
+            "docs": [
+              "running SHA-256 over the move log: committed to Solana with the result"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "log_len",
+            "type": "u32"
+          },
+          {
+            "name": "deal_committed",
+            "docs": [
+              "1 once the Room carrying `deal_commit` has been committed to Solana"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "tip_n",
+            "docs": [
+              "Tip Line entries that have picked this heist (index into the base-layer Market)"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "_pad2",
+            "type": {
+              "array": [
+                "u8",
+                2
+              ]
+            }
+          },
+          {
+            "name": "tip_seat",
+            "docs": [
+              "each Tip Line entry's suspect (NO_PICK = none yet)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                16
+              ]
+            }
+          },
+          {
+            "name": "tip_weight",
+            "docs": [
+              "each entry's weight: heist time left when it last picked (earlier = more)"
+            ],
+            "type": {
+              "array": [
+                "u16",
+                16
+              ]
+            }
           }
         ]
       }

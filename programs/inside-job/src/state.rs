@@ -5,7 +5,14 @@
 //! * `World` — the sealed truth: roles, true positions, bodies, votes, salts.
 //!             An ephemeral account whose permission has ZERO members: nobody can read it.
 //! * `View`  — what one seat is allowed to know this tick. Readable only by that seat's keys.
+//! * `MoveLog` — the heist's input log (header + records), sealed until lights-on.
+//!
+//! With the `replay` feature (tools/replay compiles this same file to WebAssembly) the
+//! zero-copy structs are plain `repr(C)` Pod types and the Anchor-only accounts drop out.
+#[cfg(not(feature = "replay"))]
 use anchor_lang::prelude::*;
+#[cfg(feature = "replay")]
+use crate::shim::Pubkey;
 
 pub const MAXP: usize = 8;
 pub const NO_SEAT: u8 = 255;
@@ -41,7 +48,11 @@ pub const CHAT_LEN: usize = 48;
 pub const NAME_LEN: usize = 12;
 pub const TASKS_PER: usize = 3;
 
-#[account(zero_copy)]
+pub const MAX_TIPS: usize = 16;
+pub const NO_PICK: u8 = 255;
+
+#[cfg_attr(not(feature = "replay"), account(zero_copy))]
+#[cfg_attr(feature = "replay", derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable), repr(C))]
 pub struct Room {
     // 8-byte fields
     pub room_id: u64,
@@ -96,10 +107,27 @@ pub struct Room {
     // ---- staked tables (appended so every older offset is unchanged)
     /// the base-layer Pot this heist is played for (0 = no pot yet / free table)
     pub pot_nonce: u64,
-    /// lamports per seat; 0 = free table
+    /// token base units (USDC: 6 decimals) per seat; 0 = free table
     pub stake: u64,
+    // ---- v2: verifiable replay + Tip Line (appended; every older offset is unchanged)
+    /// the SPL mint stakes and tips are paid in (devnet USDC)
+    pub mint: Pubkey,
+    /// H("inside-job/commit/v1" ‖ seed ‖ room ‖ heist): pushed to Solana before play
+    pub deal_commit: [u8; 32],
+    /// running SHA-256 over the move log: committed to Solana with the result
+    pub log_hash: [u8; 32],
+    pub log_len: u32,
+    /// 1 once the Room carrying `deal_commit` has been committed to Solana
+    pub deal_committed: u8,
+    /// Tip Line entries that have picked this heist (index into the base-layer Market)
+    pub tip_n: u8,
+    pub _pad2: [u8; 2],
+    /// each Tip Line entry's suspect (NO_PICK = none yet)
+    pub tip_seat: [u8; MAX_TIPS],
+    /// each entry's weight: heist time left when it last picked (earlier = more)
+    pub tip_weight: [u16; MAX_TIPS],
 }
-pub const ROOM_SIZE: usize = 1632;
+pub const ROOM_SIZE: usize = 1784;
 const _: () = assert!(core::mem::size_of::<Room>() == ROOM_SIZE);
 
 impl Room {
@@ -134,7 +162,8 @@ impl Room {
     }
 }
 
-#[account(zero_copy)]
+#[cfg_attr(not(feature = "replay"), account(zero_copy))]
+#[cfg_attr(feature = "replay", derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable), repr(C))]
 pub struct World {
     pub room_id: u64,
     pub rng: u64,
@@ -172,7 +201,8 @@ pub struct World {
 pub const WORLD_SIZE: usize = 592;
 const _: () = assert!(core::mem::size_of::<World>() == WORLD_SIZE);
 
-#[account(zero_copy)]
+#[cfg_attr(not(feature = "replay"), account(zero_copy))]
+#[cfg_attr(feature = "replay", derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable), repr(C))]
 pub struct View {
     pub room_id: u64,
     pub seat: u32,
@@ -203,6 +233,38 @@ pub struct View {
 pub const VIEW_SIZE: usize = 112;
 const _: () = assert!(core::mem::size_of::<View>() == VIEW_SIZE);
 
+pub const LOG_SEED: &[u8] = b"log";
+
+/// Header of the move log (an ephemeral account: header + 4-byte records). Everything the
+/// rules took from outside during a heist — human inputs, ballots, the clock — so anyone
+/// can replay the heist from the deal and get the exact same World. See `replaylog.rs`.
+#[cfg_attr(not(feature = "replay"), account(zero_copy))]
+#[cfg_attr(feature = "replay", derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable), repr(C))]
+pub struct MoveLog {
+    pub room_id: u64,
+    /// unix time of the first step, and the clock as of the last record
+    pub now0: i64,
+    pub last_now: i64,
+    pub match_no: u32,
+    /// sim steps taken (one per executed tick)
+    pub steps: u32,
+    pub n_recs: u32,
+    /// 1 = ran out of space; the heist can't be replayed (never silently wrong)
+    pub overflow: u8,
+    pub occ_mask: u8,
+    pub bot_mask: u8,
+    pub max_players: u8,
+    /// each human's held input as the World had it after the last step
+    pub last_in: [u8; MAXP],
+    /// human ballots already logged this meeting
+    pub logged_votes: u8,
+    pub _pad: [u8; 7],
+    /// running SHA-256 over every record
+    pub hash: [u8; 32],
+}
+pub const MOVE_LOG_SIZE: usize = 88;
+const _: () = assert!(core::mem::size_of::<MoveLog>() == MOVE_LOG_SIZE);
+
 pub const POT_SEED: &[u8] = b"pot";
 pub const POT_OPEN: u8 = 0;
 pub const POT_SETTLED: u8 = 1;
@@ -210,6 +272,8 @@ pub const POT_REFUNDED: u8 = 2;
 
 /// Base-layer escrow for one staked heist. Never delegated: it lives on Solana and is
 /// paid out by `settle`, which reads the Room state the TEE committed at lights-on.
+/// The stakes themselves sit in the Pot's token account (an ATA of the Pot PDA).
+#[cfg(not(feature = "replay"))]
 #[account]
 pub struct Pot {
     pub room_id: u64,
@@ -230,9 +294,49 @@ pub struct Pot {
 }
 pub const POT_SIZE: usize = 8 + 8 + 8 + 8 + 4 + 32 * MAXP + 32 * MAXP + 8 * MAXP; // 612
 
+#[cfg(not(feature = "replay"))]
 impl Pot {
     pub fn entry_of(&self, wallet: &Pubkey) -> Option<usize> {
         (0..self.n as usize).find(|&i| self.wallets[i] == *wallet)
+    }
+}
+
+pub const MARKET_SEED: &[u8] = b"market";
+pub const MARKET_OPEN: u8 = 0;
+pub const MARKET_RESOLVED: u8 = 1;
+pub const MARKET_REFUNDED: u8 = 2;
+
+/// The Tip Line for one heist: spectators stake on which seat is the Mole. Base-layer
+/// escrow (tokens in the Market's ATA). Picks are made inside the rollup and land in the
+/// Room; at lights-on a Magic Action copies the committed result here. No oracle.
+#[cfg(not(feature = "replay"))]
+#[account]
+pub struct Market {
+    pub room_id: u64,
+    pub created_at: i64,
+    pub match_no: u32,
+    pub status: u8,
+    pub n: u8,
+    pub bump: u8,
+    /// winning team, copied from the committed Room (255 = unresolved)
+    pub winner: u8,
+    pub wallets: [Pubkey; MAX_TIPS],
+    /// the session key that may pick for each entry inside the rollup
+    pub sessions: [Pubkey; MAX_TIPS],
+    pub amounts: [u64; MAX_TIPS],
+    pub seats: [u8; MAX_TIPS],
+    pub weights: [u16; MAX_TIPS],
+    pub roles: [u8; MAXP],
+    pub paid: [u64; MAX_TIPS],
+    /// bit e set once entry e has been paid
+    pub claimed: u16,
+}
+pub const MARKET_SIZE: usize = 8 + 8 + 4 + 4 + 32 * MAX_TIPS * 2 + 8 * MAX_TIPS + MAX_TIPS + 2 * MAX_TIPS + MAXP + 8 * MAX_TIPS + 2; // 1362
+
+#[cfg(not(feature = "replay"))]
+impl Market {
+    pub fn entry_of_session(&self, k: &Pubkey) -> Option<usize> {
+        (0..self.n as usize).find(|&i| self.sessions[i] == *k)
     }
 }
 

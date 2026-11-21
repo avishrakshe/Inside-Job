@@ -25,9 +25,11 @@ fn room_of(c: char) -> u8 {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=src/map.txt");
-    println!("cargo:rerun-if-changed=src/stations.txt");
-    let map = std::fs::read_to_string("src/map.txt").expect("map.txt");
+    // the program builds from its own dir; tools/replay (the WASM replay) reuses this script
+    let dir = if std::path::Path::new("src/map.txt").exists() { "src" } else { "../../programs/inside-job/src" };
+    println!("cargo:rerun-if-changed={dir}/map.txt");
+    println!("cargo:rerun-if-changed={dir}/stations.txt");
+    let map = std::fs::read_to_string(format!("{dir}/map.txt")).expect("map.txt");
     let rows: Vec<&str> = map.lines().map(|l| l.trim_end_matches('\r')).filter(|l| !l.is_empty()).collect();
     assert_eq!(rows.len(), H, "map must have {H} rows");
     let mut tiles = vec![0u8; W * H];
@@ -37,7 +39,7 @@ fn main() {
             tiles[y * W + x] = room_of(c);
         }
     }
-    let st_txt = std::fs::read_to_string("src/stations.txt").expect("stations.txt");
+    let st_txt = std::fs::read_to_string(format!("{dir}/stations.txt")).expect("stations.txt");
     let mut stations: Vec<(usize, usize)> = Vec::new();
     for line in st_txt.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
         let mut it = line.split_whitespace();

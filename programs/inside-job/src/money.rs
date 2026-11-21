@@ -1,8 +1,9 @@
 //! The money rules, as pure functions so they're unit-tested on the host.
 //!
-//! * Every ticket is `stake` lamports. A ticket whose holder never took a seat is refunded.
+//! * Every ticket is `stake` token units (devnet USDC). A ticket whose holder never took a
+//!   seat is refunded.
 //! * Seated humans on the winning team split everything the seated humans staked,
-//!   evenly; the remainder (≤ n-1 lamports) goes to the first winner. No house rake.
+//!   evenly; the remainder (≤ n-1 units) goes to the first winner. No house rake.
 //! * If no seated human is on the winning team (bots won), every seated human is refunded:
 //!   there's nobody to pay, and the house never keeps a stake.
 //! * Conservation: the sum of payouts is always exactly `stake * tickets`.
@@ -65,6 +66,51 @@ pub fn refunds(pot: &Pot) -> [u64; MAXP] {
     for e in 0..(pot.n as usize).min(MAXP) {
         out[e] = pot.stake;
     }
+    out
+}
+
+/// The Tip Line's rules, from the committed result:
+/// * an entry that never picked gets its stake back;
+/// * a correct pick (the seat was a Mole) gets its stake back plus a share of every wrong
+///   pick's stake, in proportion to stake × weight (weight = heist time left when it last
+///   picked, so calling it early pays more);
+/// * if nobody picked a Mole, every stake is returned. No house cut.
+/// * Conservation: the sum of payouts is always exactly the sum of stakes.
+pub fn tip_payouts(n: usize, amounts: &[u64; MAX_TIPS], seats: &[u8; MAX_TIPS], weights: &[u16; MAX_TIPS], roles: &[u8; MAXP]) -> [u64; MAX_TIPS] {
+    let n = n.min(MAX_TIPS);
+    let mut out = [0u64; MAX_TIPS];
+    let right = |e: usize| (seats[e] as usize) < MAXP && roles[seats[e] as usize] == ROLE_MOLE;
+    let mut losers: u128 = 0;
+    let mut score_sum: u128 = 0;
+    for e in 0..n {
+        if (seats[e] as usize) >= MAXP {
+            out[e] = amounts[e]; // never picked
+        } else if right(e) {
+            out[e] = amounts[e];
+            score_sum += amounts[e] as u128 * weights[e].max(1) as u128;
+        } else {
+            losers += amounts[e] as u128;
+        }
+    }
+    if score_sum == 0 {
+        for e in 0..n {
+            out[e] = amounts[e];
+        }
+        return out;
+    }
+    let mut given: u128 = 0;
+    let mut first = usize::MAX;
+    for e in 0..n {
+        if (seats[e] as usize) < MAXP && right(e) {
+            let share = losers * (amounts[e] as u128 * weights[e].max(1) as u128) / score_sum;
+            out[e] += share as u64;
+            given += share;
+            if first == usize::MAX {
+                first = e;
+            }
+        }
+    }
+    out[first] += (losers - given) as u64;
     out
 }
 
@@ -180,5 +226,47 @@ mod tests {
         }
         let pot = pot_with(6, 42);
         assert_eq!(sum(&refunds(&pot)), 42 * 6);
+    }
+
+    #[test]
+    fn tips_right_early_beats_right_late_and_wrong_pays_both() {
+        let mut roles = [ROLE_UNKNOWN; MAXP];
+        roles[..5].copy_from_slice(&[ROLE_CREW, ROLE_CREW, ROLE_MOLE, ROLE_CREW, ROLE_CREW]);
+        let mut amounts = [0u64; MAX_TIPS];
+        let mut seats = [NO_PICK; MAX_TIPS];
+        let mut weights = [0u16; MAX_TIPS];
+        // 0: right & early, 1: right & late, 2: wrong, 3: never picked
+        amounts[..4].copy_from_slice(&[1_000_000, 1_000_000, 3_000_000, 500_000]);
+        seats[..3].copy_from_slice(&[2, 2, 4]);
+        weights[..3].copy_from_slice(&[500, 100, 300]);
+        let p = tip_payouts(4, &amounts, &seats, &weights, &roles);
+        assert_eq!(p[3], 500_000, "no pick: refunded");
+        assert_eq!(p[2], 0, "wrong pick loses its stake");
+        assert!(p[0] > p[1] && p[1] > 1_000_000, "both right ones profit, the early one more");
+        assert_eq!(p.iter().sum::<u64>(), 5_500_000);
+    }
+
+    #[test]
+    fn tips_conserve_and_refund_when_nobody_is_right() {
+        let mut roles = [ROLE_CREW; MAXP];
+        roles[6] = ROLE_MOLE;
+        for n in 0..=MAX_TIPS {
+            for pattern in 0u32..64 {
+                let mut amounts = [0u64; MAX_TIPS];
+                let mut seats = [NO_PICK; MAX_TIPS];
+                let mut weights = [0u16; MAX_TIPS];
+                for e in 0..n {
+                    amounts[e] = 100_000 + (e as u64 * 7_919 + pattern as u64 * 104_729) % 4_900_000;
+                    let r = (pattern as usize * 31 + e * 17) % 10;
+                    seats[e] = if r == 9 { NO_PICK } else { (r % MAXP) as u8 };
+                    weights[e] = ((pattern as usize * 13 + e * 101) % 540) as u16;
+                }
+                let p = tip_payouts(n, &amounts, &seats, &weights, &roles);
+                assert_eq!(p.iter().sum::<u64>(), amounts.iter().sum::<u64>(), "n={n} pattern={pattern}");
+                if !seats.iter().take(n).any(|&s| s == 6) {
+                    assert_eq!(p, amounts, "nobody picked the Mole: everyone is refunded");
+                }
+            }
+        }
     }
 }

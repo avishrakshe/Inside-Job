@@ -22,7 +22,7 @@ use ephemeral_rollups_sdk::anchor::{delegate, ephemeral, vrf, vrf_callback};
 use ephemeral_rollups_sdk::consts::{DELEGATION_PROGRAM_ID, EPHEMERAL_VAULT_ID, MAGIC_CONTEXT_ID, MAGIC_PROGRAM_ID, PERMISSION_PROGRAM_ID};
 use ephemeral_rollups_sdk::cpi::DelegateConfig;
 use ephemeral_rollups_sdk::crank::{ScheduleCrankCpi, ScheduleTaskArgs};
-use anchor_lang::solana_program::program::invoke;
+use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use ephemeral_rollups_sdk::ephemeral_accounts::EphemeralAccount;
 use ephemeral_rollups_sdk::vrf::instructions::{create_request_randomness_ix, RequestRandomnessParams};
 use ephemeral_rollups_sdk::vrf::types::SerializableAccountMeta;
@@ -30,6 +30,7 @@ use ephemeral_rollups_sdk::vrf::types::SerializableAccountMeta;
 pub mod errors;
 pub mod magic;
 pub mod money;
+pub mod replaylog;
 pub mod sim;
 pub mod state;
 
@@ -53,7 +54,15 @@ pub const MIN_PLAYERS: usize = 4;
 pub const BOT_NAMES: [&[u8]; MAXP] = [b"VAULTBOT", b"LOCKPICK", b"GHOSTWIRE", b"SAFECRACK", b"TUMBLER", b"KEYRING", b"LOOKOUT", b"DRILLER"];
 /// Anyone may refund an unsettled pot after this long (a heist's crank runs ≤ 15 min).
 pub const REFUND_AFTER_SECS: i64 = 20 * 60;
-pub const SETTLE_CU: u32 = 150_000;
+pub const SETTLE_CU: u32 = 200_000;
+pub const TIPS_CU: u32 = 60_000;
+pub const TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+pub const ATA_PROGRAM_ID: Pubkey = pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+/// Tip Line stake bounds, in token base units (USDC: 0.1 to 5)
+pub const MIN_TIP: u64 = 100_000;
+pub const MAX_TIP: u64 = 5_000_000;
+/// The move log starts at 10 KiB and grows 10 KiB per `grow_log` call (CPI realloc limit).
+pub const LOG_STEP_BYTES: usize = 10_240;
 
 #[ephemeral]
 #[program]
@@ -64,7 +73,9 @@ pub mod inside_job {
 
     /// Create a room and pre-fund it: its lamports follow it into the rollup and pay
     /// for the sealed accounts and their permissions there.
-    pub fn create_room(ctx: Context<CreateRoom>, room_id: u64, max_players: u8, prefund: u64, stake: u64) -> Result<()> {
+    /// `mint` is the SPL token stakes and tips are paid in (devnet USDC); `stake` is in its
+    /// base units per seat (0 = free table; free tables still run a Tip Line in `mint`).
+    pub fn create_room(ctx: Context<CreateRoom>, room_id: u64, max_players: u8, prefund: u64, stake: u64, mint: Pubkey) -> Result<()> {
         if prefund > 0 {
             transfer(
                 CpiContext::new(
@@ -89,25 +100,25 @@ pub mod inside_job {
         room.roles_pub = [ROLE_UNKNOWN; MAXP];
         room.stake = stake;
         room.staked = (stake > 0) as u8;
+        room.mint = mint;
+        room.tip_seat = [NO_PICK; MAX_TIPS];
         Ok(())
     }
 
-    /// Staked tables: pay `stake` into this heist's Pot on Solana and name the session key
-    /// that may use the ticket to take a seat in the rollup. The Pot is plain base-layer
-    /// state (never delegated), so the money never leaves Solana.
+    /// Staked tables: pay `stake` (USDC) into this heist's Pot on Solana and name the
+    /// session key that may use the ticket to take a seat in the rollup. The Pot is plain
+    /// base-layer state (never delegated), so the money never leaves Solana.
     pub fn buy_ticket(ctx: Context<BuyTicket>, room_id: u64, nonce: u64, session: Pubkey) -> Result<()> {
         require!(nonce != 0, GameError::PotMismatch);
-        let stake = {
-            let ai = ctx.accounts.room.to_account_info();
-            let owner_ok = *ai.owner == crate::ID || ai.owner.to_bytes() == DELEGATION_PROGRAM_ID.to_bytes();
-            require!(owner_ok, GameError::BadAccount);
-            let d = ai.try_borrow_data()?;
-            require!(d.len() >= DISC + ROOM_SIZE && &d[..DISC] == Room::DISCRIMINATOR, GameError::BadAccount);
-            let r: &Room = body_ref(&d);
-            require!(r.room_id == room_id, GameError::BadAccount);
-            r.stake
-        };
+        let room = read_room(&ctx.accounts.room.to_account_info(), room_id)?;
+        let stake = room.stake;
         require!(stake > 0, GameError::NotStaked);
+        let a = &ctx.accounts;
+        require_keys_eq!(a.mint.key(), room.mint, GameError::BadMint);
+        require_keys_eq!(a.wallet_ata.key(), ata_of(&a.wallet.key(), &room.mint), GameError::BadMint);
+        require_keys_eq!(a.vault.key(), ata_of(&a.pot.key(), &room.mint), GameError::BadMint);
+        let decimals = mint_decimals(&a.mint.to_account_info())?;
+        create_ata_idempotent(&a.wallet.to_account_info(), &a.vault.to_account_info(), &a.pot.to_account_info(), &a.mint.to_account_info(), &a.system_program.to_account_info(), &a.token_program.to_account_info(), &a.ata_program.to_account_info())?;
         let wallet = ctx.accounts.wallet.key();
         let pot = &mut ctx.accounts.pot;
         if pot.stake == 0 {
@@ -127,37 +138,26 @@ pub mod inside_job {
         pot.sessions[e] = session;
         pot.n += 1;
         let amount = pot.stake;
-        transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.key(),
-                Transfer { from: ctx.accounts.wallet.to_account_info(), to: ctx.accounts.pot.to_account_info() },
-            ),
-            amount,
-        )
+        let a = &ctx.accounts;
+        transfer_tokens(&a.wallet_ata.to_account_info(), &a.mint.to_account_info(), &a.vault.to_account_info(), &a.wallet.to_account_info(), &a.token_program.to_account_info(), amount, decimals, &[])
     }
 
     /// Pay out a finished staked heist. Runs on Solana as the Magic Action that the TEE
     /// schedules at lights-on, right after it commits the Room. It is also permissionless:
     /// the outcome is read from the committed Room, so a direct call pays exactly the same.
     /// No oracle and no admin: the result was sealed program state all along.
-    /// remaining accounts (any order): the Pot, the Room, every ticket holder's wallet.
+    /// remaining accounts (any order): the Pot, the Room, the Pot's token account, the mint,
+    /// the token program, every ticket holder's token account.
     pub fn settle<'info>(ctx: Context<'info, Settle>, room_id: u64, nonce: u64) -> Result<()> {
         let rest = ctx.remaining_accounts;
         let (pot_ai, mut pot) = find_pot(rest, room_id, nonce)?;
         require!(pot.status == POT_OPEN, GameError::PotClosed);
-        let (room_key, _) = Pubkey::find_program_address(&[ROOM_SEED, &room_id.to_le_bytes()], &crate::ID);
-        let room_ai = rest.iter().find(|a| *a.key == room_key).ok_or(GameError::BadAccount)?;
-        let owner_ok = *room_ai.owner == crate::ID || room_ai.owner.to_bytes() == DELEGATION_PROGRAM_ID.to_bytes();
-        require!(owner_ok, GameError::BadAccount);
-        let room: Room = {
-            let d = room_ai.try_borrow_data()?;
-            require!(d.len() >= DISC + ROOM_SIZE && &d[..DISC] == Room::DISCRIMINATOR, GameError::BadAccount);
-            *body_ref::<Room>(&d)
-        };
+        let room_ai = find_key(rest, &room_pda(room_id))?;
+        let room = read_room(room_ai, room_id)?;
         let finished = room.phase == PH_ENDED || room.phase == PH_REVEALED;
-        require!(room.room_id == room_id && room.pot_nonce == nonce && finished && room.winner <= TEAM_MOLE, GameError::NotSettleable);
+        require!(room.pot_nonce == nonce && finished && room.winner <= TEAM_MOLE, GameError::NotSettleable);
         let pay = money::payouts(&room, &pot);
-        pay_out(pot_ai, rest, &pot, &pay)?;
+        pay_out(pot_ai, rest, &pot, &room.mint, &pay)?;
         pot.status = POT_SETTLED;
         pot.winner = room.winner;
         pot.paid = pay;
@@ -173,12 +173,110 @@ pub mod inside_job {
         let (pot_ai, mut pot) = find_pot(rest, room_id, nonce)?;
         require!(pot.status == POT_OPEN, GameError::PotClosed);
         require!(Clock::get()?.unix_timestamp >= pot.created_at + REFUND_AFTER_SECS, GameError::TooEarly);
+        let room = read_room(find_key(rest, &room_pda(room_id))?, room_id)?;
         let pay = money::refunds(&pot);
-        pay_out(pot_ai, rest, &pot, &pay)?;
+        pay_out(pot_ai, rest, &pot, &room.mint, &pay)?;
         pot.status = POT_REFUNDED;
         pot.paid = pay;
         let mut d = pot_ai.try_borrow_mut_data()?;
         pot.try_serialize(&mut &mut d[..])?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ Tip Line (Solana)
+
+    /// Spectators: stake `amount` (USDC) on this heist's Tip Line and name the session key
+    /// that will make your pick inside the rollup. One entry per wallet per heist.
+    pub fn buy_tip(ctx: Context<BuyTip>, room_id: u64, match_no: u32, amount: u64, session: Pubkey) -> Result<()> {
+        require!((MIN_TIP..=MAX_TIP).contains(&amount), GameError::TipRange);
+        require!(session != Pubkey::default(), GameError::NoTip);
+        let room = read_room(&ctx.accounts.room.to_account_info(), room_id)?;
+        let a = &ctx.accounts;
+        require_keys_eq!(a.mint.key(), room.mint, GameError::BadMint);
+        require_keys_eq!(a.wallet_ata.key(), ata_of(&a.wallet.key(), &room.mint), GameError::BadMint);
+        require_keys_eq!(a.vault.key(), ata_of(&a.market.key(), &room.mint), GameError::BadMint);
+        let decimals = mint_decimals(&a.mint.to_account_info())?;
+        create_ata_idempotent(&a.wallet.to_account_info(), &a.vault.to_account_info(), &a.market.to_account_info(), &a.mint.to_account_info(), &a.system_program.to_account_info(), &a.token_program.to_account_info(), &a.ata_program.to_account_info())?;
+        let wallet = ctx.accounts.wallet.key();
+        let m = &mut ctx.accounts.market;
+        if m.created_at == 0 {
+            m.room_id = room_id;
+            m.match_no = match_no;
+            m.created_at = Clock::get()?.unix_timestamp;
+            m.status = MARKET_OPEN;
+            m.bump = ctx.bumps.market;
+            m.winner = 255;
+            m.seats = [NO_PICK; MAX_TIPS];
+        }
+        require!(m.status == MARKET_OPEN, GameError::MarketClosed);
+        require!((m.n as usize) < MAX_TIPS, GameError::MarketFull);
+        require!(!m.wallets[..m.n as usize].contains(&wallet), GameError::DuplicateTip);
+        require!(m.entry_of_session(&session).is_none(), GameError::DuplicateTip);
+        let e = m.n as usize;
+        m.wallets[e] = wallet;
+        m.sessions[e] = session;
+        m.amounts[e] = amount;
+        m.n += 1;
+        let a = &ctx.accounts;
+        transfer_tokens(&a.wallet_ata.to_account_info(), &a.mint.to_account_info(), &a.vault.to_account_info(), &a.wallet.to_account_info(), &a.token_program.to_account_info(), amount, decimals, &[])
+    }
+
+    /// Resolve a heist's Tip Line from the committed Room: copies every pick, the roles and
+    /// the winner, and computes each entry's payout. Runs as a Magic Action right after the
+    /// lights-on commit; permissionless while the committed Room is still this heist.
+    /// Never resolvable (heist abandoned, commit lost)? 20 minutes after the first tip the
+    /// same call turns the Tip Line into full refunds instead.
+    /// remaining accounts (any order): the Market, the Room.
+    pub fn record_tips<'info>(ctx: Context<'info, Settle>, room_id: u64, match_no: u32) -> Result<()> {
+        let rest = ctx.remaining_accounts;
+        let m_ai = find_key(rest, &market_pda(room_id, match_no))?;
+        require!(m_ai.is_writable && *m_ai.owner == crate::ID, GameError::BadAccount);
+        let mut m = Market::try_deserialize(&mut &m_ai.try_borrow_data()?[..])?;
+        require!(m.status == MARKET_OPEN, GameError::MarketClosed);
+        let room = read_room(find_key(rest, &room_pda(room_id))?, room_id)?;
+        let finished = room.phase == PH_ENDED || room.phase == PH_REVEALED;
+        if room.match_no == match_no && finished && room.winner <= TEAM_MOLE {
+            let n = m.n as usize;
+            for e in 0..n {
+                m.seats[e] = room.tip_seat[e];
+                m.weights[e] = room.tip_weight[e];
+            }
+            m.roles = room.roles_pub;
+            m.winner = room.winner;
+            m.paid = money::tip_payouts(n, &m.amounts, &m.seats, &m.weights, &m.roles);
+            m.status = MARKET_RESOLVED;
+        } else {
+            require!(Clock::get()?.unix_timestamp >= m.created_at + REFUND_AFTER_SECS, GameError::NotSettleable);
+            m.paid = m.amounts;
+            m.status = MARKET_REFUNDED;
+        }
+        let mut d = m_ai.try_borrow_mut_data()?;
+        m.try_serialize(&mut &mut d[..])?;
+        Ok(())
+    }
+
+    /// Pay one Tip Line entry what it's owed, into its wallet's token account. Permissionless.
+    pub fn claim_tip(ctx: Context<ClaimTip>, room_id: u64, match_no: u32, entry: u8) -> Result<()> {
+        let e = entry as usize;
+        let (amount, owner, mint_key, bump) = {
+            let m = &ctx.accounts.market;
+            require!(m.room_id == room_id && m.match_no == match_no, GameError::BadAccount);
+            require!(m.status == MARKET_RESOLVED || m.status == MARKET_REFUNDED, GameError::NotResolved);
+            require!(e < m.n as usize, GameError::NoTip);
+            require!(m.claimed & (1 << e) == 0, GameError::AlreadyClaimed);
+            (m.paid[e], m.wallets[e], ctx.accounts.mint.key(), m.bump)
+        };
+        let a = &ctx.accounts;
+        require_keys_eq!(a.vault.key(), ata_of(&a.market.key(), &mint_key), GameError::BadMint);
+        require_keys_eq!(a.dest.key(), ata_of(&owner, &mint_key), GameError::BadMint);
+        if amount > 0 {
+            let decimals = mint_decimals(&a.mint.to_account_info())?;
+            let rid = room_id.to_le_bytes();
+            let mno = match_no.to_le_bytes();
+            let seeds: &[&[u8]] = &[MARKET_SEED, &rid, &mno, &[bump]];
+            transfer_tokens(&a.vault.to_account_info(), &a.mint.to_account_info(), &a.dest.to_account_info(), &a.market.to_account_info(), &a.token_program.to_account_info(), amount, decimals, &[seeds])?;
+        }
+        ctx.accounts.market.claimed |= 1 << e;
         Ok(())
     }
 
@@ -195,12 +293,16 @@ pub mod inside_job {
 
     // ------------------------------------------------------------ Rollup: setup (once per room)
 
-    /// Create the sealed World (zero readers) and make the Room publicly readable.
+    /// Create the sealed World (zero readers), the sealed move log, and make the Room
+    /// publicly readable. Call again until it's a no-op: each later call grows the move
+    /// log by up to 10 KiB (one CPI realloc) toward its full size.
     pub fn setup_core<'info>(ctx: Context<'info, SetupCore<'info>>) -> Result<()> {
         let (room_id, bump) = {
             let room = ctx.accounts.room.load()?;
             if room.ready_mask & READY_CORE != 0 {
-                return Ok(());
+                let (rid, b) = (room.room_id, room.bump);
+                drop(room);
+                return grow_log(&ctx, rid, b);
             }
             (room.room_id, room.bump)
         };
@@ -243,16 +345,44 @@ pub mod inside_job {
                 payer: room_ai.clone(),
                 permissioned_account: room_ai.clone(),
                 permission: rp,
-                vault,
+                vault: vault.clone(),
                 magic_program: ctx.accounts.magic_program.to_account_info(),
                 permission_program: ctx.accounts.permission_program.to_account_info(),
                 args: EphemeralMembersArgs { is_private: false, members: vec![] },
             }
             .invoke_signed(&[room_seeds])?;
         }
+        // the move log: sealed like the World until lights-on (it holds every cuff input)
+        let log_ai = ctx.accounts.log.to_account_info();
+        let log_bump = expect_pda(&log_ai, &[LOG_SEED, &rid])?;
+        let log_seeds: &[&[u8]] = &[LOG_SEED, &rid, &[log_bump]];
+        if log_ai.data_is_empty() {
+            EphemeralAccount::new(&room_ai, &log_ai, &vault)
+                .with_signer_seeds(&[room_seeds, log_seeds])
+                .create(LOG_STEP_BYTES as u32)?;
+            let mut d = log_ai.try_borrow_mut_data()?;
+            d[..DISC].copy_from_slice(MoveLog::DISCRIMINATOR);
+            let h: &mut MoveLog = body_mut(&mut d);
+            h.room_id = room_id;
+        }
+        let lp = ctx.accounts.log_permission.to_account_info();
+        expect_permission(&lp, log_ai.key)?;
+        if lp.data_is_empty() {
+            CreateEphemeralPermissionCpi {
+                payer: room_ai.clone(),
+                permissioned_account: log_ai.clone(),
+                permission: lp,
+                vault,
+                magic_program: ctx.accounts.magic_program.to_account_info(),
+                permission_program: ctx.accounts.permission_program.to_account_info(),
+                args: EphemeralMembersArgs { is_private: true, members: vec![] },
+            }
+            .invoke_signed(&[room_seeds, log_seeds])?;
+        }
         ctx.accounts.room.load_mut()?.ready_mask |= READY_CORE;
         Ok(())
     }
+
 
     /// Create one seat's private View (no readers until someone sits down).
     pub fn setup_view<'info>(ctx: Context<'info, SeatAccounts<'info>>, seat: u8) -> Result<()> {
@@ -434,6 +564,19 @@ pub mod inside_job {
             room.seed_state = 0;
             room.winner = NO_SEAT;
             room.task_id = ((room.room_id % 1_000_000) * 10_000 + clock.slot % 10_000) as i64;
+            // a fresh heist: new commitment, new log, an empty Tip Line
+            room.deal_commit = [0; 32];
+            room.deal_committed = 0;
+            room.log_hash = [0; 32];
+            room.log_len = 0;
+            room.tip_n = 0;
+            room.tip_seat = [NO_PICK; MAX_TIPS];
+            room.tip_weight = [0; MAX_TIPS];
+            {
+                let mut ld = ctx.accounts.log.try_borrow_mut_data()?;
+                let h = log_header(&mut ld, room.room_id)?;
+                replaylog::begin(h, &room);
+            }
             (room.task_id, room.room_id)
         };
         {
@@ -442,6 +585,27 @@ pub mod inside_job {
             w.dealt = 0;
             w.role = [ROLE_UNKNOWN; MAXP];
             w.alive = [0; MAXP];
+        }
+        // the previous heist's log was public since its lights-on: seal it again
+        {
+            let rid = room_id.to_le_bytes();
+            let bump = ctx.accounts.room.load()?.bump;
+            let room_seeds: &[&[u8]] = &[ROOM_SEED, &rid, &[bump]];
+            let log_ai = ctx.accounts.log.to_account_info();
+            let log_bump = expect_pda(&log_ai, &[LOG_SEED, &rid])?;
+            expect_permission(&ctx.accounts.log_permission, log_ai.key)?;
+            UpdateEphemeralPermissionCpi {
+                payer: ctx.accounts.room.to_account_info(),
+                permissioned_account: log_ai.clone(),
+                permission: ctx.accounts.log_permission.to_account_info(),
+                vault: ctx.accounts.ephemeral_vault.to_account_info(),
+                magic_program: ctx.accounts.magic_program.to_account_info(),
+                permission_program: ctx.accounts.permission_program.to_account_info(),
+                authority: log_ai.clone(),
+                authority_is_signer: false,
+                args: EphemeralMembersArgs { is_private: true, members: vec![] },
+            }
+            .invoke_signed(&[room_seeds, &[LOG_SEED, &rid, &[log_bump]]])?;
         }
         // 1. VRF — the oracle's output is only half of the deal; the salts are the other half
         let ix = create_request_randomness_ix(RequestRandomnessParams {
@@ -470,6 +634,8 @@ pub mod inside_job {
             metas.push(AccountMeta::new(v.key(), false));
             accs.push(v.clone());
         }
+        metas.push(AccountMeta::new(ctx.accounts.log.key(), false));
+        accs.push(ctx.accounts.log.to_account_info());
         let mut cu = vec![2u8];
         cu.extend_from_slice(&1_400_000u32.to_le_bytes());
         let budget_ix = Instruction { program_id: COMPUTE_BUDGET_PROGRAM, accounts: vec![], data: cu };
@@ -497,6 +663,23 @@ pub mod inside_job {
         w.vrf = randomness;
         sim::deal(&mut room, w, mixed);
         room.seed_state = 1;
+        room.deal_commit = replaylog::deal_commit(&mixed, room.room_id, room.match_no, sha);
+        Ok(())
+    }
+
+    /// Push the Room (now carrying `deal_commit`) to Solana before the heist gets going, so
+    /// the deal is on the base layer while it's still sealed. Anyone may call it, once per
+    /// heist. At lights-on anyone checks the revealed seed against this commitment.
+    pub fn commit_deal<'info>(ctx: Context<'info, CommitRoom<'info>>) -> Result<()> {
+        {
+            let mut room = ctx.accounts.room.load_mut()?;
+            require!(matches!(room.phase, PH_PLAY | PH_MEETING | PH_RESULT), GameError::WrongPhase);
+            require!(room.deal_committed == 0, GameError::AlreadyCommitted);
+            room.deal_committed = 1;
+        }
+        let a = &ctx.accounts;
+        let ix = magic::commit_ix(a.payer.key(), a.room.key(), &[]);
+        invoke(&ix, &[a.payer.to_account_info(), a.magic_context.to_account_info(), a.room.to_account_info(), a.magic_program.to_account_info()])?;
         Ok(())
     }
 
@@ -515,6 +698,7 @@ pub mod inside_job {
         w.vrf = pseudo;
         sim::deal(&mut room, w, mixed);
         room.seed_state = 2;
+        room.deal_commit = replaylog::deal_commit(&mixed, room.room_id, room.match_no, sha);
         Ok(())
     }
 
@@ -573,6 +757,30 @@ pub mod inside_job {
         Ok(())
     }
 
+    /// Tip Line: call who the Mole is (spectators only). Signed by the session key the
+    /// tip named; remaining account 0 is the base-layer Market, read inside the rollup.
+    /// Weight = heist time left, so an early call is worth more. Re-picking is allowed but
+    /// resets the weight to now. Closed once the heist ends; dead seats can't be picked.
+    pub fn pick(ctx: Context<Pick>, seat: u8) -> Result<()> {
+        let player = ctx.accounts.player.key();
+        let mut room = ctx.accounts.room.load_mut()?;
+        require!(matches!(room.phase, PH_PLAY | PH_MEETING | PH_RESULT), GameError::WrongPhase);
+        let m_ai = ctx.remaining_accounts.first().ok_or(GameError::NoTip)?;
+        require_keys_eq!(*m_ai.key, market_pda(room.room_id, room.match_no), GameError::NoTip);
+        require_keys_eq!(*m_ai.owner, crate::ID, GameError::NoTip);
+        let m = Market::try_deserialize(&mut &m_ai.try_borrow_data()?[..])?;
+        require!(m.status == MARKET_OPEN, GameError::MarketClosed);
+        let e = m.entry_of_session(&player).ok_or(GameError::NoTip)?;
+        // no insider trading from inside the crew
+        require!(room.seat_of(&player).is_none() && !room.wallets.contains(&m.wallets[e]), GameError::Insider);
+        let s = seat as usize;
+        require!(s < MAXP && room.occupied(s) && room.alive_pub[s] == 1, GameError::BadPick);
+        room.tip_seat[e] = seat;
+        room.tip_weight[e] = (sim::HEIST_TICKS.saturating_sub(room.tick) / 10).max(1) as u16;
+        room.tip_n = room.tip_n.max(e as u8 + 1);
+        Ok(())
+    }
+
     /// One 100 ms step. Called by the crank; any client may call it too as a liveness
     /// fallback — the slot gate stops double-ticking.
     pub fn tick<'info>(ctx: Context<'info, Tick<'info>>) -> Result<()> {
@@ -604,25 +812,88 @@ pub mod inside_job {
         let mut views: Vec<&mut View> = bufs.iter_mut().map(|b| body_mut::<View>(&mut b[..])).collect();
         let mut wd = ctx.accounts.world.try_borrow_mut_data()?;
         let w = world_mut(&mut wd, room_id)?;
+        // log what feeds this step, run the rules, remember what they left behind
+        require_keys_eq!(*ctx.accounts.log.owner, crate::ID, GameError::BadAccount);
+        let mut ld = ctx.accounts.log.try_borrow_mut_data()?;
+        require!(ld.len() >= DISC + MOVE_LOG_SIZE && &ld[..DISC] == MoveLog::DISCRIMINATOR, GameError::BadAccount);
+        let (hb, recs) = ld[DISC..].split_at_mut(MOVE_LOG_SIZE);
+        let h: &mut MoveLog = bytemuck::from_bytes_mut(hb);
+        require!(h.room_id == room_id, GameError::BadAccount);
+        replaylog::record_step(h, recs, &room, w, clock.unix_timestamp, sha);
         sim::tick(&mut room, w, &mut views[..], clock.unix_timestamp);
+        replaylog::after_step(h, &room, w);
+        room.log_hash = h.hash;
+        room.log_len = h.n_recs;
         Ok(())
     }
 
-    /// Lights on: World and every View flip to public, so anyone can replay the deal
-    /// (VRF + salts) and check every role. remaining: [view_i, view_perm_i] x 8 (+ the Pot).
-    /// Staked tables: the Room is committed to Solana with a post-commit Magic Action that
-    /// runs `settle` there, so the payout happens in the same flow as the reveal.
+    /// Lights on: World, every View and the move log flip to public, so anyone can check
+    /// the deal (VRF + salts) and replay the whole heist. remaining: [view_i, view_perm_i] x 8
+    /// (+ the Pot on staked tables). Every heist's final Room — winner, roles, deal
+    /// commitment, log hash — is committed to Solana, with Magic Actions that resolve the
+    /// Tip Line and pay the Pot there, in the same flow as the reveal.
     pub fn finish<'info>(ctx: Context<'info, Lights<'info>>) -> Result<()> {
-        let (room_id, bump, pot_nonce) = {
+        let (room_id, bump, pot_nonce, match_no, tips, mint) = {
             let mut room = ctx.accounts.room.load_mut()?;
             require!(room.phase == PH_ENDED, GameError::WrongPhase);
             room.phase = PH_REVEALED;
-            (room.room_id, room.bump, room.pot_nonce)
+            (room.room_id, room.bump, room.pot_nonce, room.match_no, room.tip_n > 0, room.mint)
         };
         flip_all(&ctx, room_id, bump, false)?;
-        if pot_nonce != 0 {
-            schedule_settle(&ctx, room_id, pot_nonce)?;
+        {
+            let rid = room_id.to_le_bytes();
+            let a = &ctx.accounts;
+            let log_ai = a.log.to_account_info();
+            let log_bump = expect_pda(&log_ai, &[LOG_SEED, &rid])?;
+            expect_permission(&a.log_permission, log_ai.key)?;
+            UpdateEphemeralPermissionCpi {
+                payer: a.room.to_account_info(),
+                permissioned_account: log_ai.clone(),
+                permission: a.log_permission.to_account_info(),
+                vault: a.ephemeral_vault.to_account_info(),
+                magic_program: a.magic_program.to_account_info(),
+                permission_program: a.permission_program.to_account_info(),
+                authority: log_ai.clone(),
+                authority_is_signer: false,
+                args: EphemeralMembersArgs { is_private: false, members: vec![] },
+            }
+            .invoke_signed(&[&[ROOM_SEED, &rid, &[bump]], &[LOG_SEED, &rid, &[log_bump]]])?;
         }
+        let a = &ctx.accounts;
+        let mut actions: Vec<magic::BaseAction> = Vec::new();
+        if tips {
+            actions.push(magic::BaseAction {
+                destination: crate::ID,
+                data: anchor_lang::InstructionData::data(&crate::instruction::RecordTips { room_id, match_no }),
+                compute_units: TIPS_CU,
+                accounts: vec![(market_pda(room_id, match_no), true), (a.room.key(), false)],
+            });
+        }
+        if pot_nonce != 0 {
+            let pot_ai = ctx.remaining_accounts.get(MAXP * 2).ok_or(GameError::NoTicket)?;
+            let pot = read_pot(pot_ai, room_id, pot_nonce)?;
+            let mut metas: Vec<(Pubkey, bool)> = vec![
+                (pot_ai.key(), true),
+                (a.room.key(), false),
+                (ata_of(&pot_ai.key(), &mint), true),
+                (mint, false),
+                (TOKEN_PROGRAM_ID, false),
+            ];
+            for e in 0..(pot.n as usize).min(MAXP) {
+                let dest = ata_of(&pot.wallets[e], &mint);
+                if !metas.iter().any(|m| m.0 == dest) {
+                    metas.push((dest, true));
+                }
+            }
+            actions.push(magic::BaseAction {
+                destination: crate::ID,
+                data: anchor_lang::InstructionData::data(&crate::instruction::Settle { room_id, nonce: pot_nonce }),
+                compute_units: SETTLE_CU,
+                accounts: metas,
+            });
+        }
+        let ix = magic::commit_ix(a.payer.key(), a.room.key(), &actions);
+        invoke(&ix, &[a.payer.to_account_info(), a.magic_context.to_account_info(), a.room.to_account_info(), a.magic_program.to_account_info()])?;
         Ok(())
     }
 
@@ -676,6 +947,24 @@ pub mod inside_job {
 
 // ---------------------------------------------------------------- helpers
 
+/// `setup_core` on a ready room: grow the move log by up to 10 KiB toward full size.
+fn grow_log<'info>(ctx: &Context<'info, SetupCore<'info>>, room_id: u64, bump: u8) -> Result<()> {
+    let rid = room_id.to_le_bytes();
+    let log_ai = ctx.accounts.log.to_account_info();
+    expect_pda(&log_ai, &[LOG_SEED, &rid])?;
+    require_keys_eq!(*log_ai.owner, crate::ID, GameError::BadAccount);
+    let len = log_ai.data_len();
+    if len >= replaylog::LOG_ACCOUNT_SIZE {
+        return Ok(());
+    }
+    let to = (len + LOG_STEP_BYTES).min(replaylog::LOG_ACCOUNT_SIZE);
+    let room_seeds: &[&[u8]] = &[ROOM_SEED, &rid, &[bump]];
+    EphemeralAccount::new(&ctx.accounts.room.to_account_info(), &log_ai, &ctx.accounts.ephemeral_vault.to_account_info())
+        .with_signer_seeds(&[room_seeds])
+        .resize(to as u32)?;
+    Ok(())
+}
+
 pub fn mix_seed(room: &Room, w: &World, randomness: &[u8; 32]) -> [u8; 32] {
     let mut salts = [0u8; 32 * MAXP];
     for i in 0..MAXP {
@@ -704,37 +993,108 @@ fn find_pot<'a, 'info>(rest: &'a [AccountInfo<'info>], room_id: u64, nonce: u64)
     Ok((ai, pot))
 }
 
-/// Move lamports out of the program-owned Pot. Only the stakes move; the Pot keeps its rent.
-fn pay_out<'info>(pot_ai: &AccountInfo<'info>, rest: &[AccountInfo<'info>], pot: &Pot, pay: &[u64; MAXP]) -> Result<()> {
-    let total: u64 = pay.iter().sum();
-    let rent = Rent::get()?.minimum_balance(pot_ai.data_len());
-    require!(pot_ai.lamports() >= total + rent, GameError::BadAccount);
+/// Pay the Pot's tokens out to each ticket holder's token account (the Pot PDA signs).
+fn pay_out<'info>(pot_ai: &AccountInfo<'info>, rest: &[AccountInfo<'info>], pot: &Pot, mint: &Pubkey, pay: &[u64; MAXP]) -> Result<()> {
+    let vault = find_key(rest, &ata_of(pot_ai.key, mint))?;
+    let mint_ai = find_key(rest, mint)?;
+    let token_program = find_key(rest, &TOKEN_PROGRAM_ID)?;
+    let decimals = mint_decimals(mint_ai)?;
+    let rid = pot.room_id.to_le_bytes();
+    let nonce = pot.nonce.to_le_bytes();
+    let seeds: &[&[u8]] = &[POT_SEED, &rid, &nonce, &[pot.bump]];
     for e in 0..(pot.n as usize).min(MAXP) {
         if pay[e] == 0 {
             continue;
         }
-        let w = rest.iter().find(|a| *a.key == pot.wallets[e]).ok_or(GameError::MissingWallet)?;
-        require!(w.is_writable, GameError::MissingWallet);
-        **pot_ai.try_borrow_mut_lamports()? -= pay[e];
-        **w.try_borrow_mut_lamports()? += pay[e];
+        let dest = rest.iter().find(|a| *a.key == ata_of(&pot.wallets[e], mint)).ok_or(GameError::MissingWallet)?;
+        require!(dest.is_writable, GameError::MissingWallet);
+        transfer_tokens(vault, mint_ai, dest, pot_ai, token_program, pay[e], decimals, &[seeds])?;
     }
     Ok(())
 }
 
-/// Commit the Room to Solana and run `settle` there right after (a Magic Action).
-fn schedule_settle<'info>(ctx: &Context<'info, Lights<'info>>, room_id: u64, nonce: u64) -> Result<()> {
-    let a = &ctx.accounts;
-    let pot_ai = ctx.remaining_accounts.get(MAXP * 2).ok_or(GameError::NoTicket)?;
-    let pot = read_pot(pot_ai, room_id, nonce)?;
-    let mut metas: Vec<(Pubkey, bool)> = vec![(pot_ai.key(), true), (a.room.key(), false)];
-    for e in 0..(pot.n as usize).min(MAXP) {
-        if !metas.iter().any(|m| m.0 == pot.wallets[e]) {
-            metas.push((pot.wallets[e], true));
-        }
-    }
-    let data = anchor_lang::InstructionData::data(&crate::instruction::Settle { room_id, nonce });
-    let ix = magic::commit_with_action_ix(a.payer.key(), a.room.key(), crate::ID, &data, SETTLE_CU, &metas);
-    invoke(&ix, &[a.payer.to_account_info(), a.magic_context.to_account_info(), a.room.to_account_info(), a.magic_program.to_account_info()])?;
+pub fn sha(parts: &[&[u8]]) -> [u8; 32] {
+    hashv(parts).to_bytes()
+}
+
+pub fn room_pda(room_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[ROOM_SEED, &room_id.to_le_bytes()], &crate::ID).0
+}
+
+pub fn market_pda(room_id: u64, match_no: u32) -> Pubkey {
+    Pubkey::find_program_address(&[MARKET_SEED, &room_id.to_le_bytes(), &match_no.to_le_bytes()], &crate::ID).0
+}
+
+pub fn ata_of(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[owner.as_ref(), TOKEN_PROGRAM_ID.as_ref(), mint.as_ref()], &ATA_PROGRAM_ID).0
+}
+
+fn find_key<'a, 'info>(rest: &'a [AccountInfo<'info>], key: &Pubkey) -> Result<&'a AccountInfo<'info>> {
+    Ok(rest.iter().find(|a| a.key == key).ok_or(GameError::BadAccount)?)
+}
+
+/// The Room as Solana last saw it (owned by us, or by the delegation program while the
+/// TEE holds it: its data is then the last commit).
+/// Heap-allocated (a Room is 1.8 KB; the SBF stack frame is 4 KB).
+pub fn read_room(ai: &AccountInfo, room_id: u64) -> Result<Box<Room>> {
+    require_keys_eq!(*ai.key, room_pda(room_id), GameError::BadAccount);
+    let owner_ok = *ai.owner == crate::ID || ai.owner.to_bytes() == DELEGATION_PROGRAM_ID.to_bytes();
+    require!(owner_ok, GameError::BadAccount);
+    let d = ai.try_borrow_data()?;
+    require!(d.len() >= DISC + ROOM_SIZE && &d[..DISC] == Room::DISCRIMINATOR, GameError::BadAccount);
+    let mut r: Box<Room> = bytemuck::zeroed_box();
+    bytemuck::bytes_of_mut(&mut *r).copy_from_slice(&d[DISC..DISC + ROOM_SIZE]);
+    require!(r.room_id == room_id, GameError::BadAccount);
+    Ok(r)
+}
+
+/// The move log's header, checked against its room.
+fn log_header(d: &mut [u8], room_id: u64) -> Result<&mut MoveLog> {
+    require!(d.len() >= DISC + MOVE_LOG_SIZE && &d[..DISC] == MoveLog::DISCRIMINATOR, GameError::BadAccount);
+    let h: &mut MoveLog = body_mut(d);
+    require!(h.room_id == room_id, GameError::BadAccount);
+    Ok(h)
+}
+
+fn mint_decimals(mint: &AccountInfo) -> Result<u8> {
+    require_keys_eq!(*mint.owner, TOKEN_PROGRAM_ID, GameError::BadMint);
+    let d = mint.try_borrow_data()?;
+    require!(d.len() >= 82, GameError::BadMint);
+    Ok(d[44])
+}
+
+/// spl-token `TransferChecked` (hand-encoded: no spl-token crate in the binary).
+#[allow(clippy::too_many_arguments)]
+fn transfer_tokens<'info>(from: &AccountInfo<'info>, mint: &AccountInfo<'info>, to: &AccountInfo<'info>, authority: &AccountInfo<'info>, token_program: &AccountInfo<'info>, amount: u64, decimals: u8, seeds: &[&[&[u8]]]) -> Result<()> {
+    require_keys_eq!(*token_program.key, TOKEN_PROGRAM_ID, GameError::BadMint);
+    let mut data = Vec::with_capacity(10);
+    data.push(12u8);
+    data.extend_from_slice(&amount.to_le_bytes());
+    data.push(decimals);
+    let ix = Instruction {
+        program_id: TOKEN_PROGRAM_ID,
+        accounts: vec![AccountMeta::new(*from.key, false), AccountMeta::new_readonly(*mint.key, false), AccountMeta::new(*to.key, false), AccountMeta::new_readonly(*authority.key, true)],
+        data,
+    };
+    invoke_signed(&ix, &[from.clone(), mint.clone(), to.clone(), authority.clone(), token_program.clone()], seeds)?;
+    Ok(())
+}
+
+/// Associated Token Account `CreateIdempotent`.
+fn create_ata_idempotent<'info>(payer: &AccountInfo<'info>, ata: &AccountInfo<'info>, owner: &AccountInfo<'info>, mint: &AccountInfo<'info>, system: &AccountInfo<'info>, token: &AccountInfo<'info>, ata_program: &AccountInfo<'info>) -> Result<()> {
+    let ix = Instruction {
+        program_id: ATA_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*payer.key, true),
+            AccountMeta::new(*ata.key, false),
+            AccountMeta::new_readonly(*owner.key, false),
+            AccountMeta::new_readonly(*mint.key, false),
+            AccountMeta::new_readonly(*system.key, false),
+            AccountMeta::new_readonly(*token.key, false),
+        ],
+        data: vec![1],
+    };
+    invoke(&ix, &[payer.clone(), ata.clone(), owner.clone(), mint.clone(), system.clone(), token.clone(), ata_program.clone()])?;
     Ok(())
 }
 
@@ -849,12 +1209,71 @@ pub struct CreateRoom<'info> {
 pub struct BuyTicket<'info> {
     #[account(mut)]
     pub wallet: Signer<'info>,
+    /// CHECK: the wallet's token account for the room's mint (checked as its ATA)
+    #[account(mut)]
+    pub wallet_ata: UncheckedAccount<'info>,
     /// CHECK: the room PDA (delegated: owned by the delegation program); parsed in the handler
     #[account(seeds = [ROOM_SEED, &room_id.to_le_bytes()], bump)]
     pub room: UncheckedAccount<'info>,
     #[account(init_if_needed, payer = wallet, space = DISC + POT_SIZE, seeds = [POT_SEED, &room_id.to_le_bytes(), &nonce.to_le_bytes()], bump)]
-    pub pot: Account<'info, Pot>,
+    pub pot: Box<Account<'info, Pot>>,
+    /// CHECK: the Pot's token account (ATA of the Pot PDA), created here if needed
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+    /// CHECK: must be the room's mint
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: SPL token program
+    #[account(address = TOKEN_PROGRAM_ID)]
+    pub token_program: UncheckedAccount<'info>,
+    /// CHECK: associated token account program
+    #[account(address = ATA_PROGRAM_ID)]
+    pub ata_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(room_id: u64, match_no: u32)]
+pub struct BuyTip<'info> {
+    #[account(mut)]
+    pub wallet: Signer<'info>,
+    /// CHECK: the wallet's token account for the room's mint (checked as its ATA)
+    #[account(mut)]
+    pub wallet_ata: UncheckedAccount<'info>,
+    /// CHECK: the room PDA (delegated: owned by the delegation program); parsed in the handler
+    #[account(seeds = [ROOM_SEED, &room_id.to_le_bytes()], bump)]
+    pub room: UncheckedAccount<'info>,
+    #[account(init_if_needed, payer = wallet, space = DISC + MARKET_SIZE, seeds = [MARKET_SEED, &room_id.to_le_bytes(), &match_no.to_le_bytes()], bump)]
+    pub market: Box<Account<'info, Market>>,
+    /// CHECK: the Market's token account (ATA of the Market PDA), created here if needed
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+    /// CHECK: must be the room's mint
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: SPL token program
+    #[account(address = TOKEN_PROGRAM_ID)]
+    pub token_program: UncheckedAccount<'info>,
+    /// CHECK: associated token account program
+    #[account(address = ATA_PROGRAM_ID)]
+    pub ata_program: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(room_id: u64, match_no: u32)]
+pub struct ClaimTip<'info> {
+    #[account(mut, seeds = [MARKET_SEED, &room_id.to_le_bytes(), &match_no.to_le_bytes()], bump = market.bump)]
+    pub market: Box<Account<'info, Market>>,
+    /// CHECK: the Market's token account (checked as its ATA)
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+    /// CHECK: the entry wallet's token account (checked as its ATA)
+    #[account(mut)]
+    pub dest: UncheckedAccount<'info>,
+    /// CHECK: the mint (decimals); a wrong mint can't move this Market's tokens
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: SPL token program
+    #[account(address = TOKEN_PROGRAM_ID)]
+    pub token_program: UncheckedAccount<'info>,
 }
 
 /// `settle` / `refund` find every account by address in the remaining accounts, so they
@@ -890,6 +1309,12 @@ pub struct SetupCore<'info> {
     /// CHECK: the Room's permission PDA, checked in the handler
     #[account(mut)]
     pub room_permission: UncheckedAccount<'info>,
+    /// CHECK: the move log PDA, checked in the handler
+    #[account(mut)]
+    pub log: UncheckedAccount<'info>,
+    /// CHECK: the move log's permission PDA, checked in the handler
+    #[account(mut)]
+    pub log_permission: UncheckedAccount<'info>,
     /// CHECK: permission program
     #[account(address = PERMISSION_PROGRAM_ID)]
     pub permission_program: UncheckedAccount<'info>,
@@ -899,6 +1324,27 @@ pub struct SetupCore<'info> {
     /// CHECK: magic program
     #[account(address = MAGIC_PROGRAM_ID)]
     pub magic_program: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CommitRoom<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, seeds = [ROOM_SEED, &room.load()?.room_id.to_le_bytes()], bump)]
+    pub room: AccountLoader<'info, Room>,
+    /// CHECK: magic program
+    #[account(address = MAGIC_PROGRAM_ID)]
+    pub magic_program: UncheckedAccount<'info>,
+    /// CHECK: magic context
+    #[account(mut, address = MAGIC_CONTEXT_ID)]
+    pub magic_context: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct Pick<'info> {
+    pub player: Signer<'info>,
+    #[account(mut)]
+    pub room: AccountLoader<'info, Room>,
 }
 
 #[derive(Accounts)]
@@ -943,6 +1389,18 @@ pub struct StartMatch<'info> {
     /// CHECK: magic program
     #[account(address = MAGIC_PROGRAM_ID)]
     pub magic_program: UncheckedAccount<'info>,
+    /// CHECK: the move log PDA, checked in the handler
+    #[account(mut, owner = crate::ID)]
+    pub log: UncheckedAccount<'info>,
+    /// CHECK: the move log's permission PDA, checked in the handler
+    #[account(mut)]
+    pub log_permission: UncheckedAccount<'info>,
+    /// CHECK: permission program
+    #[account(address = PERMISSION_PROGRAM_ID)]
+    pub permission_program: UncheckedAccount<'info>,
+    /// CHECK: ephemeral rent vault
+    #[account(mut, address = EPHEMERAL_VAULT_ID)]
+    pub ephemeral_vault: UncheckedAccount<'info>,
 }
 
 #[vrf_callback]
@@ -996,6 +1454,9 @@ pub struct Tick<'info> {
     /// CHECK: verified in handler
     #[account(mut)]
     pub view7: UncheckedAccount<'info>,
+    /// CHECK: the move log, verified in handler (discriminator + room id)
+    #[account(mut)]
+    pub log: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -1019,7 +1480,13 @@ pub struct Lights<'info> {
     /// CHECK: magic program
     #[account(address = MAGIC_PROGRAM_ID)]
     pub magic_program: UncheckedAccount<'info>,
-    /// CHECK: magic context (staked tables commit the Room at lights-on)
+    /// CHECK: magic context (every heist's Room is committed at lights-on)
     #[account(mut, address = MAGIC_CONTEXT_ID)]
     pub magic_context: UncheckedAccount<'info>,
+    /// CHECK: the move log PDA, checked in `finish` (unsealed at lights-on)
+    #[account(mut)]
+    pub log: UncheckedAccount<'info>,
+    /// CHECK: the move log's permission PDA, checked in `finish`
+    #[account(mut)]
+    pub log_permission: UncheckedAccount<'info>,
 }
