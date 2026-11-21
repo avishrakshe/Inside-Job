@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { GameClient } from "../chain/client";
 import { MAXP, PH, PHASE_NAME, ROLE_CREW, ROLE_MOLE, RoomState, ViewState, WorldState, isEmptyKey, occupied } from "../chain/decode";
 import { draw, drawMinimap, SEAT_COLORS } from "../game/render";
-import { dirFromKeys, GHOST_SPEED, HEIST_TICKS, ROOM_NAMES, SPEED, STATIONS, USE_R, step, dist2, tileAt } from "../game/map";
+import { dirFromKeys, HEIST_TICKS, ROOM_NAMES, STATIONS, USE_R, dist2, tileAt } from "../game/map";
+import { Predictor } from "../game/predict";
 import { verifyDeal, VerifyReport } from "../chain/verify";
 import { sfx, isMuted, setMuted, onMute } from "../game/sfx";
 import { CuffedScreen, CuffFlash, Dealing, EjectScene, EndScreen, MeetingSplash, RoleReveal } from "./Cinematics";
@@ -17,10 +18,7 @@ import { TipLinePanel, TipResults } from "./TipLine";
 import { trackEvent } from "../analytics";
 import ChainLog from "./ChainLog";
 import type { TxEvent } from "../chain/client";
-import { FORCE_TOUCH, goLandscape, unrotate, useMedia } from "./phone";
-
-/** Phone: a tap re-enters fullscreen landscape if the browser dropped out of it. */
-const keepLandscape = () => { if (!document.fullscreenElement) goLandscape(); };
+import { FORCE_TOUCH, keepLandscape, unrotate, useMedia } from "./phone";
 
 const IN_USE = 1 << 4, IN_CUFF = 1 << 5, IN_REPORT = 1 << 6, IN_EMERGENCY = 1 << 7;
 const F_CAN_USE = 1, F_CAN_REPORT = 2, F_CAN_CUFF = 4, F_AT_BUTTON = 8;
@@ -377,14 +375,16 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const keys = useRef<Record<string, boolean>>({});
   const edges = useRef(0);
+  /** your predicted position (sim lattice, server-consistent): station range checks, minimap */
   const pred = useRef<{ x: number; y: number } | null>(null);
+  const predictor = useRef(new Predictor());
   const viewRef = useRef(view);
   viewRef.current = view;
   const roomRef = useRef(room);
   roomRef.current = room;
-  const [touch, setTouch] = useState({ dx: 0, dy: 0 });
-  const touchRef = useRef(touch);
-  touchRef.current = touch;
+  // joystick vector lives in a ref: setting state on every finger move re-rendered the
+  // whole HUD 60-120×/s while you walked
+  const touchRef = useRef({ dx: 0, dy: 0 });
   const [task, setTask] = useState<{ st: number; slot: number; fake: boolean } | null>(null);
   const taskRef = useRef(task);
   taskRef.current = task;
@@ -444,6 +444,12 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); window.removeEventListener("blur", blur); };
   }, [seated, tryUse]);
 
+  /** The direction you're steering right now (0 while a task screen or cinematic is up). */
+  const liveDir = useCallback(() => {
+    if (roomRef.current.phase !== PH.PLAY || taskRef.current || blockedRef.current) return 0;
+    return currentDir();
+  }, [currentDir]);
+
   // constant-rate input: one `act` every 100 ms whether or not you moved (timing leaks nothing)
   useEffect(() => {
     if (!seated) return;
@@ -451,26 +457,21 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
     const iv = setInterval(() => {
       if (roomRef.current.phase !== PH.PLAY) return;
       const working = !!taskRef.current;
-      const dir = working || blockedRef.current ? 0 : currentDir();
+      const dir = liveDir();
       const input = dir | (working ? IN_USE : 0) | edges.current;
       edges.current = 0;
       client.act(roomId, input).catch(() => {});
-      const v = viewRef.current;
-      if (v && pred.current) {
-        const [nx, ny] = step(pred.current.x, pred.current.y, input, v.alive ? SPEED : GHOST_SPEED);
-        pred.current = { x: nx, y: ny };
-        if (dir && v.alive && ++n % 3 === 0) sfx.step();
-      }
+      if (dir && viewRef.current?.alive && ++n % 3 === 0) sfx.step();
     }, 100);
     return () => clearInterval(iv);
-  }, [seated, client, roomId, currentDir]);
+  }, [seated, client, roomId, liveDir]);
 
-  // reconcile prediction with the sealed truth
+  // reconcile the prediction with the sealed truth (see game/predict.ts)
   useEffect(() => {
     if (!view) return;
-    const p = pred.current;
-    if (!p || dist2(p.x, p.y, view.meX, view.meY) > 40 * 40 || room.phase !== PH.PLAY) pred.current = { x: view.meX, y: view.meY };
-    else pred.current = { x: p.x + (view.meX - p.x) * 0.35, y: p.y + (view.meY - p.y) * 0.35 };
+    const P = predictor.current;
+    P.onServer(view.meX, view.meY, view.tick, room.phase === PH.PLAY, performance.now());
+    pred.current = { x: P.x, y: P.y };
   }, [view, room.phase]);
 
   // close the task screen when the heist pauses or the task is done
@@ -502,25 +503,51 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
   // render loop
   useEffect(() => {
     let raf = 0;
+    const c = canvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext("2d", { alpha: false })!;
+    // size from a ResizeObserver: reading clientWidth every frame forced a layout whenever
+    // React had just touched the HUD
+    let w = c.clientWidth, h = c.clientHeight;
+    const ro = new ResizeObserver(() => { w = c.clientWidth; h = c.clientHeight; });
+    ro.observe(c);
+    // adaptive sharpness: start crisp, step the backing resolution down only if the GPU
+    // genuinely can't keep up (< 25 fps for 2 s). A steady 30 fps is a power-saving cap
+    // (iOS Low Power Mode), not a slow GPU, and must not make the game blurry.
+    let cap = isTouch ? 1.75 : 2;
+    let avg = 16, lastT = 0, slowFor = 0;
     const frame = (t: number) => {
-      const c = canvasRef.current;
-      if (c) {
-        // crisp on every screen, capped so big phones don't burn the GPU
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        const w = c.clientWidth, h = c.clientHeight;
-        if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
-        const ctx = c.getContext("2d")!;
+      if (lastT && document.visibilityState === "visible") {
+        const ft = Math.min(200, t - lastT);
+        avg = avg * 0.92 + ft * 0.08;
+        slowFor = avg > 40 ? slowFor + ft : 0;
+        if (slowFor > 2000 && cap > 1) { cap = Math.max(1, cap - 0.25); slowFor = 0; avg = 16; }
+      }
+      lastT = t;
+      const dpr = Math.min(window.devicePixelRatio || 1, cap);
+      const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+      if (bw > 0 && bh > 0) {
+        if (c.width !== bw || c.height !== bh) { c.width = bw; c.height = bh; }
+        const r = roomRef.current, v = viewRef.current;
+        let me: { x: number; y: number } | null = null;
+        if (seated) {
+          const P = predictor.current;
+          if (P.ready && v) {
+            P.frame(liveDir(), v.alive === 1, t);
+            me = { x: P.rx, y: P.ry };
+            pred.current = { x: P.x, y: P.y };
+          }
+        }
         ctx.save();
-        const r = roomRef.current;
         const showAll = r.phase === PH.REVEALED && world ? { x: world.x, y: world.y, role: world.role, alive: world.alive } : null;
-        draw(ctx, w, h, { view: seated ? viewRef.current : null, me: seated ? pred.current : null, names: r.names, seat: seated ? seat : -1, showAll, t, follow: seated, dpr });
+        draw(ctx, w, h, { view: seated ? v : null, me, names: r.names, seat: seated ? seat : -1, showAll, t, follow: seated, dpr });
         ctx.restore();
       }
       raf = requestAnimationFrame(frame);
     };
     raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
-  }, [seated, seat, world]);
+    return () => { cancelAnimationFrame(raf); ro.disconnect(); };
+  }, [seated, seat, world, isTouch, liveDir]);
 
   const flags = view?.flags ?? 0;
   const press = (bit: number) => { edges.current |= bit; };
@@ -597,7 +624,7 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
           </button>
         </div>
       )}
-      {seated && room.phase === PH.PLAY && <Joystick onChange={setTouch} />}
+      {seated && room.phase === PH.PLAY && <Joystick out={touchRef} />}
 
       {mapOpen && <MiniMap view={view} me={pred.current} seat={seated ? seat : -1} onClose={() => setMapOpen(false)} />}
       {task && room.phase === PH.PLAY && (
@@ -698,24 +725,56 @@ function MiniMap({ view, me, seat, onClose }: { view: ViewState | null; me: { x:
   );
 }
 
-function Joystick({ onChange }: { onChange: (v: { dx: number; dy: number }) => void }) {
+/**
+ * Analog stick → 8-way input. Writes straight into a ref and moves the knob through the DOM,
+ * so dragging never re-renders React. Tracks one finger (the one that went down on it), so a
+ * second thumb tapping USE/CUFF can't hijack or release the stick.
+ */
+function Joystick({ out }: { out: React.MutableRefObject<{ dx: number; dy: number }> }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [knob, setKnob] = useState({ x: 0, y: 0 });
+  const knob = useRef<HTMLDivElement>(null);
+  const finger = useRef<number | null>(null);
+  const center = useRef({ x: 0, y: 0, r: 1 });
+  const set = (dx: number, dy: number, kx: number, ky: number) => {
+    out.current = { dx, dy };
+    if (knob.current) knob.current.style.transform = `translate(${kx}px, ${ky}px)`;
+  };
   const handle = (e: React.PointerEvent) => {
-    const r = ref.current!.getBoundingClientRect();
-    const sx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
-    const sy = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
+    const c = center.current;
+    const sx = (e.clientX - c.x) / c.r;
+    const sy = (e.clientY - c.y) / c.r;
     // app rotated 90° clockwise (portrait phone): screen → game axes
     const [dx, dy] = unrotate(ref.current!, sx, sy);
     const m = Math.min(1, Math.hypot(dx, dy));
     const a = Math.atan2(dy, dx);
-    setKnob({ x: Math.cos(a) * m * 34, y: Math.sin(a) * m * 34 });
-    onChange({ dx: Math.cos(a) * m, dy: Math.sin(a) * m });
+    // the knob travels in the stick's own (already rotated) coordinate space
+    const travel = (ref.current!.offsetWidth || 124) * 0.27;
+    set(Math.cos(a) * m, Math.sin(a) * m, Math.cos(a) * m * travel, Math.sin(a) * m * travel);
   };
-  const end = () => { setKnob({ x: 0, y: 0 }); onChange({ dx: 0, dy: 0 }); };
+  const down = (e: React.PointerEvent) => {
+    if (finger.current !== null) return;
+    e.preventDefault();
+    finger.current = e.pointerId;
+    try { ref.current!.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    // measure once per touch (the bounding box of a rotated element is still centred right)
+    const r = ref.current!.getBoundingClientRect();
+    center.current = { x: r.left + r.width / 2, y: r.top + r.height / 2, r: Math.max(1, Math.min(r.width, r.height) / 2) };
+    handle(e);
+  };
+  const end = (e: React.PointerEvent) => {
+    if (e.pointerId !== finger.current) return;
+    finger.current = null;
+    set(0, 0, 0, 0);
+  };
+  // never leave the robber walking if the stick unmounts mid-drag (meeting called, etc.)
+  useEffect(() => () => { out.current = { dx: 0, dy: 0 }; }, [out]);
   return (
-    <div ref={ref} className="joystick" onPointerDown={(e) => { (e.target as HTMLElement).setPointerCapture(e.pointerId); handle(e); }} onPointerMove={(e) => e.buttons && handle(e)} onPointerUp={end} onPointerCancel={end}>
-      <div className="knob" style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }} />
+    <div ref={ref} className="joystick"
+      onPointerDown={down}
+      onPointerMove={(e) => { if (e.pointerId === finger.current) handle(e); }}
+      onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end}
+      onContextMenu={(e) => e.preventDefault()}>
+      <div ref={knob} className="knob" />
     </div>
   );
 }

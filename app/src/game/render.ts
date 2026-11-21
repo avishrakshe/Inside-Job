@@ -37,28 +37,36 @@ export interface RenderInput {
 
 // ------------------------------------------------------------------ animation state
 
-interface Anim { x: number; y: number; facing: number; walk: number; moving: boolean; last: number }
+interface Anim { x: number; y: number; facing: number; walk: number; moving: boolean; last: number; still: number }
 const anims = new Map<number, Anim>();
-function animate(key: number, tx: number, ty: number, now: number): Anim {
+/**
+ * Others arrive in 7 px hops once per tick: ease toward them. Your own robber is already
+ * smooth (game/predict.ts), so `direct` draws it exactly where the predictor says and only
+ * derives facing / walk cycle from its velocity; easing it again added ~90 ms of lag.
+ */
+function animate(key: number, tx: number, ty: number, now: number, direct = false): Anim {
   let a = anims.get(key);
   if (!a || (a.x - tx) ** 2 + (a.y - ty) ** 2 > 140 * 140) {
-    a = { x: tx, y: ty, facing: 1, walk: 0, moving: false, last: now };
+    a = { x: tx, y: ty, facing: 1, walk: 0, moving: false, last: now, still: 0 };
     anims.set(key, a);
     return a;
   }
   const dt = Math.min(0.1, Math.max(0, (now - a.last) / 1000));
   a.last = now;
-  const k = 1 - Math.exp(-dt * 11);
+  const k = direct ? 1 : 1 - Math.exp(-dt * 11);
   const dx = tx - a.x, dy = ty - a.y;
   a.x += dx * k;
   a.y += dy * k;
-  const moving = Math.abs(dx) + Math.abs(dy) > 1.2;
-  if (Math.abs(dx) > 0.8) a.facing = dx > 0 ? 1 : -1;
+  // moving = real speed, held for a moment so the walk cycle doesn't flicker between frames
+  const v = dt > 0 ? Math.hypot(dx, dy) * k / dt : 0;
+  if (v > 12) a.still = 0; else a.still += dt;
+  const moving = a.still < 0.12;
+  if (Math.abs(dx) > (direct ? 0.05 : 0.8)) a.facing = dx > 0 ? 1 : -1;
   if (moving) a.walk += dt * 15;
   a.moving = moving;
   return a;
 }
-const cam = { x: MAP_PX_W / 2, y: MAP_PX_H / 2, s: 1, init: false };
+const cam = { x: MAP_PX_W / 2, y: MAP_PX_H / 2, s: 1, init: false, last: 0 };
 
 let fogCanvas: HTMLCanvasElement | null = null;
 let fogData: ImageData | null = null;
@@ -83,10 +91,16 @@ export function draw(ctx: CanvasRenderingContext2D, w: number, h: number, inp: R
     tgtX = MAP_PX_W <= hw * 2 ? MAP_PX_W / 2 : Math.max(hw, Math.min(MAP_PX_W - hw, tgtX));
     tgtY = MAP_PX_H <= hh * 2 ? MAP_PX_H / 2 : Math.max(hh, Math.min(MAP_PX_H - hh, tgtY));
   }
-  if (!cam.init || Math.abs(cam.s - tgtS) > 1.5) { cam.x = tgtX; cam.y = tgtY; cam.s = tgtS; cam.init = true; }
-  cam.x += (tgtX - cam.x) * 0.18;
-  cam.y += (tgtY - cam.y) * 0.18;
-  cam.s += (tgtS - cam.s) * 0.12;
+  // frame-rate independent follow (a fixed 0.18/frame felt twice as laggy at 30 fps)
+  const cdt = cam.last ? Math.min(0.1, Math.max(0, (t - cam.last) / 1000)) : 0;
+  cam.last = t;
+  if (!cam.init || Math.abs(cam.s - tgtS) > 1.5 || (tgtX - cam.x) ** 2 + (tgtY - cam.y) ** 2 > 400 * 400) {
+    cam.x = tgtX; cam.y = tgtY; cam.s = tgtS; cam.init = true;
+  }
+  const kp = 1 - Math.exp(-cdt * 14), ks = 1 - Math.exp(-cdt * 7);
+  cam.x += (tgtX - cam.x) * kp;
+  cam.y += (tgtY - cam.y) * kp;
+  cam.s += (tgtS - cam.s) * ks;
   const s = cam.s;
   const ox = w / 2 - cam.x * s, oy = h / 2 - cam.y * s;
 
@@ -124,7 +138,7 @@ export function draw(ctx: CanvasRenderingContext2D, w: number, h: number, inp: R
   list.sort((a, b) => a.y - b.y);
   for (const d of list) {
     seen.add(d.seat);
-    const an = animate(d.seat, d.x, d.y, t);
+    const an = animate(d.seat, d.x, d.y, t, d.me && !reveal);
     if (d.me) {
       // your own light
       const g = ctx.createRadialGradient(an.x, an.y, 4, an.x, an.y, 46);
@@ -225,15 +239,18 @@ function drawStations(ctx: CanvasRenderingContext2D, v: ViewState | null, t: num
     const { x, y } = st;
     ctx.save();
     if (active) {
-      ctx.shadowColor = "#ffd23f";
-      ctx.shadowBlur = 10 + Math.sin(t / 200) * 5;
+      // pulsing halo (layered fills; shadowBlur is a per-frame Gaussian blur on phones)
+      const p = 0.5 + 0.5 * Math.sin(t / 200);
+      ctx.fillStyle = `rgba(255,210,63,${0.10 + p * 0.10})`;
+      ctx.beginPath(); ctx.roundRect(x - 17, y - 14, 34, 30, 9); ctx.fill();
+      ctx.fillStyle = `rgba(255,210,63,${0.12 + p * 0.12})`;
+      ctx.beginPath(); ctx.roundRect(x - 14, y - 11, 28, 24, 7); ctx.fill();
     }
     // console body
     ctx.fillStyle = "#2a3346";
     ctx.strokeStyle = active ? "#ffd23f" : "#0b0f18";
     ctx.lineWidth = active ? 2 : 1.5;
     ctx.beginPath(); ctx.roundRect(x - 11, y - 8, 22, 18, 4); ctx.fill(); ctx.stroke();
-    ctx.shadowBlur = 0;
     // screen
     ctx.fillStyle = done ? "#1d6b4a" : active ? "#6b5a12" : "#1b3a5a";
     ctx.beginPath(); ctx.roundRect(x - 8, y - 6, 16, 9, 2); ctx.fill();
@@ -262,13 +279,13 @@ function drawStations(ctx: CanvasRenderingContext2D, v: ViewState | null, t: num
 function drawButton(ctx: CanvasRenderingContext2D, t: number) {
   const { x, y } = BUTTON;
   ctx.save();
-  ctx.shadowColor = "#ff2d55";
-  ctx.shadowBlur = 8 + Math.sin(t / 250) * 6;
+  const p = 0.5 + 0.5 * Math.sin(t / 250);
+  ctx.fillStyle = `rgba(255,45,85,${0.12 + p * 0.14})`;
+  ctx.beginPath(); ctx.ellipse(x, y - 1, 17 + p * 3, 12 + p * 2, 0, 0, 7); ctx.fill();
   ctx.fillStyle = "#c81e3c";
   ctx.beginPath(); ctx.ellipse(x, y, 10, 6, 0, 0, 7); ctx.fill();
   ctx.fillStyle = "#ff4d6d";
   ctx.beginPath(); ctx.ellipse(x, y - 3, 9, 5.5, 0, 0, 7); ctx.fill();
-  ctx.shadowBlur = 0;
   ctx.fillStyle = "rgba(200,230,255,0.22)";
   ctx.strokeStyle = "rgba(220,240,255,0.5)";
   ctx.lineWidth = 1;

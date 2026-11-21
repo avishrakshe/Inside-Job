@@ -24,6 +24,13 @@ export const worldPda = (id: number) => PublicKey.findProgramAddressSync([Buffer
 export const viewPda = (id: number, seat: number) =>
   PublicKey.findProgramAddressSync([Buffer.from("view"), le64(id), Buffer.from([seat])], PROGRAM_ID)[0];
 export const permPda = (acc: PublicKey) => permissionPdaFromAccount(acc);
+const pdaCache = new Map<number, { room: PublicKey; world: PublicKey }>();
+const pdasOf = (id: number) => {
+  let p = pdaCache.get(id);
+  if (!p) { p = { room: roomPda(id), world: worldPda(id) }; pdaCache.set(id, p); }
+  return p;
+};
+const ACT_DISC = Buffer.from((idl as any).instructions.find((i: any) => i.name === "act").discriminator);
 const le64n = (n: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(n); return b; };
 export const potPda = (id: number, nonce: bigint) =>
   PublicKey.findProgramAddressSync([Buffer.from("pot"), le64(id), le64n(nonce)], PROGRAM_ID)[0];
@@ -118,10 +125,34 @@ export class GameClient {
   onTx(fn: (e: TxEvent) => void) { this.listeners.push(fn); return () => { this.listeners = this.listeners.filter((f) => f !== fn); }; }
   private emit(e: TxEvent) { this.listeners.forEach((f) => f(e)); }
 
-  async send(ixs: TransactionInstruction[], label: string, opts: { confirm?: boolean } = {}): Promise<string> {
+  // ---- blockhash cache for the move stream. A rollup blockhash stays valid for 6000 slots
+  // (~60 s); fetching one per move cost a full extra round trip on every 100 ms step.
+  // Only `act` uses it: each act carries a fresh seq, so its signature is always unique.
+  // (A cached hash would make two identical `tick`s collide as "already processed".)
+  private bh: { hash: string; at: number } | null = null;
+  private bhLoading: Promise<string> | null = null;
+  private refreshBlockhash(): Promise<string> {
+    if (!this.bhLoading) {
+      this.bhLoading = this.conn.getLatestBlockhash().then((r) => {
+        this.bh = { hash: r.blockhash, at: Date.now() };
+        return r.blockhash;
+      }).finally(() => { this.bhLoading = null; });
+    }
+    return this.bhLoading;
+  }
+  private async fastBlockhash(): Promise<string> {
+    const b = this.bh, age = b ? Date.now() - b.at : Infinity;
+    if (b && age < 20_000) {
+      if (age > 6_000) this.refreshBlockhash().catch(() => {}); // refresh in the background
+      return b.hash;
+    }
+    return this.refreshBlockhash();
+  }
+
+  async send(ixs: TransactionInstruction[], label: string, opts: { confirm?: boolean; fastHash?: boolean } = {}): Promise<string> {
     const tx = new Transaction().add(...ixs);
     tx.feePayer = this.session.publicKey;
-    tx.recentBlockhash = (await this.conn.getLatestBlockhash()).blockhash;
+    tx.recentBlockhash = opts.fastHash ? await this.fastBlockhash() : (await this.conn.getLatestBlockhash()).blockhash;
     tx.sign(this.session);
     const sig = await this.conn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
     const ev: TxEvent = { sig, label, at: Date.now() };
@@ -394,8 +425,22 @@ export class GameClient {
   }
   /** Fire-and-forget: one uniform instruction for every gameplay action. */
   async act(id: number, input: number) {
-    const ix = await this.program.methods.act(input & 0xff, this.seq++).accountsPartial(this.actAccounts(id)).instruction();
-    const sig = await this.send([ix], "act", { confirm: false });
+    // hand-encoded (discriminator + u8 input + u32 seq): this runs 10×/s, and the Anchor
+    // builder plus two PDA searches per call were measurable on phones
+    const data = Buffer.alloc(13);
+    ACT_DISC.copy(data, 0);
+    data.writeUInt8(input & 0xff, 8);
+    data.writeUInt32LE(this.seq++ >>> 0, 9);
+    const { room, world } = pdasOf(id);
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID, data,
+      keys: [
+        { pubkey: this.pubkey, isSigner: true, isWritable: false },
+        { pubkey: room, isSigner: false, isWritable: true },
+        { pubkey: world, isSigner: false, isWritable: true },
+      ],
+    });
+    const sig = await this.send([ix], "act", { confirm: false, fastHash: true });
     this.lastActSig = sig;
     return sig;
   }

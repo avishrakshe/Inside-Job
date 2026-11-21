@@ -494,6 +494,11 @@ body:has(.stagewrap.full) { overflow: hidden; overscroll-behavior: none; }
 body:has(.shell.phone) { overflow: hidden; overscroll-behavior: none; }
 .shell.phone { position: fixed; inset: 0; height: auto; min-height: 0; overflow-x: hidden; overflow-y: auto; container-type: size; }
 .shell.phone.rot { inset: auto; top: 0; left: 0; width: 100dvh; height: 100vw; transform-origin: top left; transform: rotate(90deg) translateY(-100%); }
+/* holding the stick or a button must never start a text selection, the iOS magnifier,
+   a long-press callout or a double-tap zoom */
+.stagewrap.full, .shell.phone .gamewrap { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+.stagewrap.full input, .stagewrap.full textarea { -webkit-user-select: text; user-select: text; }
+.stagewrap.full .actions, .stagewrap.full .hud-tr, .stagewrap.full .joystick { touch-action: none; }
 .shell.phone .error.floaterr { top: 8px; }
 .shell.phone .lbl { display: none; }
 .aboutback { position: fixed; top: 10px; left: 10px; z-index: 90; }

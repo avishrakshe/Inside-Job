@@ -11,7 +11,7 @@ import { sfx, isMuted, setMuted, onMute } from "./game/sfx";
 import { short, usdc, useWallet, WalletState } from "./ui/wallet";
 import { trackEvent } from "./analytics";
 import { PhoneIntro, PhoneMenu } from "./ui/PhoneHome";
-import { goLandscape, useMedia, usePhone } from "./ui/phone";
+import { goLandscape, usePhone, usePortrait } from "./ui/phone";
 
 // the game screen (canvas renderer, minigames, cinematics) loads only when you sit down
 const RoomScreen = lazy(() => import("./ui/RoomScreen"));
@@ -41,7 +41,7 @@ export default function App() {
   const w = useWallet();
   // phones: the whole app is a landscape game, opening on an intro every launch
   const phone = usePhone();
-  const portrait = useMedia("(orientation: portrait)");
+  const portrait = usePortrait();
   const [started, setStarted] = useState(false);
   const [about, setAbout] = useState(false);
   const start = () => { goLandscape(); sfx.join(); setStarted(true); };
@@ -54,16 +54,34 @@ export default function App() {
 
   useEffect(() => {
     if (!client) return;
-    const off = client.onTx((e) => setTxs((prev) => {
-      const i = prev.findIndex((p) => p.sig === e.sig);
-      if (i >= 0) { const n = [...prev]; n[i] = { ...n[i], ...e }; return n; }
-      txTotals.current.all++;
-      if (e.label === "act") txTotals.current.acts++;
-      // moves stream at 10/s: cap them, but never let them push joins/chats/votes out of the log
-      let acts = 0;
-      return [e, ...prev].filter((t) => t.label !== "act" || ++acts <= 120).slice(0, 220);
-    }));
-    return off;
+    // Moves stream at 10/s. Updating React state on each one re-rendered the whole app
+    // (and the game screen under it) ten times a second, which made phones stutter.
+    // Buffer events and flush at most every 800 ms instead.
+    let buf: TxEvent[] = [];
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const flush = () => {
+      timer = null;
+      const batch = buf;
+      buf = [];
+      setTxs((prev) => {
+        let next = prev;
+        for (const e of batch) {
+          const i = next.findIndex((p) => p.sig === e.sig);
+          if (i >= 0) { next = next === prev ? [...prev] : next; next[i] = { ...next[i], ...e }; continue; }
+          txTotals.current.all++;
+          if (e.label === "act") txTotals.current.acts++;
+          next = [e, ...next];
+        }
+        // cap the moves, but never let them push joins/chats/votes out of the log
+        let acts = 0;
+        return next.filter((t) => t.label !== "act" || ++acts <= 120).slice(0, 220);
+      });
+    };
+    const off = client.onTx((e) => {
+      buf.push(e);
+      if (!timer) timer = setTimeout(flush, e.label === "act" ? 800 : 0);
+    });
+    return () => { off(); if (timer) clearTimeout(timer); };
   }, [client]);
 
   // live network numbers for the landing page: TEE round trip + measured crank rate
@@ -228,7 +246,10 @@ export default function App() {
 
   const humansOf = (r: RoomState) => Array.from({ length: MAXP }, (_, i) => i).filter((i) => !isEmptyKey(r.players[i])).length;
   const quickPlay = () => {
-    const open = ROOM_IDS.map((id) => rooms[id]).filter((r): r is RoomState => !!r && r.phase === PH.LOBBY && humansOf(r) < r.maxPlayers);
+    const known = ROOM_IDS.map((id) => rooms[id]);
+    if (known.some((r) => r === undefined)) { setErr("Still reaching the crews. Try again in a second."); return; }
+    if (known.every((r) => r === null)) { setErr("The crews are offline right now (the rollup has no tables). Try again later."); return; }
+    const open = known.filter((r): r is RoomState => !!r && r.phase === PH.LOBBY && humansOf(r) < r.maxPlayers);
     if (!open.length) { setErr("Every crew is mid-heist right now. Watch one, or try again in a minute."); return; }
     open.sort((a, b) => humansOf(b) - humansOf(a));
     trackEvent("play_free_click", { room: open[0].roomId });
@@ -372,7 +393,8 @@ async function heal(client: GameClient, rooms: (RoomState | null)[]) {
 }
 
 function CrewCard({ id, r, busy, onJoin, onWatch }: { id: number; r: RoomState | null | undefined; busy: number | null; onJoin: (r: RoomState) => void; onWatch: () => void }) {
-  if (!r) return <div className="crewcard dim"><div className="cc-head"><b>{id >= 20 ? "TABLE" : "CREW"} #{id}</b></div><div className="muted">{r === undefined ? "connecting…" : "offline"}</div></div>;
+  // (room ids moved to 31-34 / 41-42 in v2, so "id >= 20" no longer means staked)
+  if (!r) return <div className="crewcard dim"><div className="cc-head"><b>{STAKED_ROOM_IDS.includes(id) ? "TABLE" : "CREW"} #{id}</b></div><div className="muted">{r === undefined ? "connecting…" : "offline"}</div></div>;
   const humans = Array.from({ length: MAXP }, (_, i) => i).filter((i) => !isEmptyKey(r.players[i])).length;
   const open = r.phase === PH.LOBBY && humans < r.maxPlayers;
   const seated = Array.from({ length: MAXP }, (_, i) => i).filter((i) => occupied(r, i));
