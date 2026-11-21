@@ -122,20 +122,24 @@ input:focus, select:focus { border-color: var(--gold); }
 
 /* ---------- room */
 .roomscreen { position: relative; flex: 1; display: flex; min-height: 0; }
-.stagewrap { position: relative; flex: 1; height: calc(100dvh - 60px - 52px); min-height: 460px; margin: 8px; border-radius: 22px; overflow: hidden; border: 3px solid var(--ink); box-shadow: 0 6px 0 var(--ink); background: #05040e; }
+.shell:has(.roomscreen) { height: 100dvh; min-height: 0; }
+.stagewrap { position: relative; flex: 1; min-height: 420px; margin: 8px; border-radius: 22px; overflow: hidden; border: 3px solid var(--ink); box-shadow: 0 6px 0 var(--ink); background: #05040e; }
 .gamewrap { position: absolute; inset: 0; }
-canvas.game { width: 100%; height: 100%; display: block; touch-action: none; image-rendering: pixelated; image-rendering: crisp-edges; }
+canvas.game { width: 100%; height: 100%; display: block; touch-action: none; }
 
-/* HUD */
-.hud-tl { position: absolute; left: 10px; top: 10px; display: flex; gap: 8px; align-items: flex-start; z-index: 3; max-width: calc(100% - 20px); }
+/* HUD: progress + tasks top-left, tools top-right, joystick bottom-left, actions bottom-right */
+.hud-tl { position: absolute; left: 10px; top: 10px; display: flex; gap: 8px; align-items: flex-start; z-index: 3; max-width: calc(100% - 210px); }
+.hud-col { display: grid; gap: 6px; justify-items: start; min-width: 0; }
 .hud-tr { position: absolute; right: 10px; top: 10px; display: flex; gap: 8px; align-items: center; z-index: 3; }
 .hudcard { background: #0d0a24e6; border: 3px solid var(--ink); border-radius: 14px; padding: 10px 12px; min-width: 190px; max-width: 280px; box-shadow: 0 4px 0 var(--ink); }
-.tasklist .tl-role { font-family: var(--display); font-weight: 700; font-size: 15px; color: var(--crew); margin-bottom: 4px; }
+.tasklist .tl-role { font-family: var(--display); font-weight: 700; font-size: 15px; color: var(--crew); margin: 0 0 4px; display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: 0; padding: 0; text-align: left; }
+.tasklist.shut .tl-role { margin-bottom: 0; }
+.tl-count { margin-left: auto; font-family: var(--body); font-size: 11px; font-weight: 800; color: var(--muted); white-space: nowrap; }
 .tasklist.mole .tl-role { color: var(--mole); }
 .tl-task { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 800; padding: 3px 0; color: #fff; }
 .tl-task.done { color: var(--crew); text-decoration: line-through; text-decoration-thickness: 2px; }
 .tasklist.mole .tl-task { color: #ffb8c6; }
-.vaultbar { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 3; display: flex; align-items: center; gap: 8px; background: #0d0a24e6; border: 3px solid var(--ink); border-radius: 14px; padding: 6px 12px; font-family: var(--display); font-weight: 700; font-size: 13px; box-shadow: 0 4px 0 var(--ink); }
+.vaultbar { position: relative; z-index: 3; display: flex; align-items: center; gap: 8px; background: #0d0a24e6; border: 3px solid var(--ink); border-radius: 14px; padding: 6px 12px; font-family: var(--display); font-weight: 700; font-size: 13px; box-shadow: 0 4px 0 var(--ink); }
 .vaultbar .bar { width: clamp(90px, 22vw, 260px); height: 14px; background: #241c50; border: 2px solid var(--ink); border-radius: 8px; overflow: hidden; }
 .vaultbar .bar div { height: 100%; background: repeating-linear-gradient(-45deg, #3ddc97 0 8px, #2fc47f 8px 16px); transition: width .4s; }
 .roster { position: absolute; left: 10px; bottom: 10px; display: flex; flex-wrap: wrap; gap: 6px; z-index: 3; max-width: 70%; }
@@ -357,14 +361,18 @@ canvas.game { width: 100%; height: 100%; display: block; touch-action: none; ima
 @media (max-width: 900px) {
   .hero { grid-template-columns: 1fr; min-height: 0; }
   .hero-art { height: 220px; }
-  .lobbyscreen { grid-template-columns: 1fr; grid-template-rows: minmax(260px, 1fr) auto; overflow: auto; }
+  .lobbyscreen { grid-template-columns: 1fr; grid-template-rows: auto auto; overflow: auto; }
+  .lobby-main { min-height: min(440px, 68dvh); }
+  .hud-row .btn { white-space: nowrap; }
+  .crewtag { font-size: 14px; }
   .lobby-side { border-left: 0; border-top: 3px solid var(--ink); }
-  .stagewrap { margin: 4px; height: calc(100dvh - 104px); border-radius: 16px; }
+  .stagewrap { margin: 4px; border-radius: 16px; }
   .mt-body { grid-template-columns: 1fr; }
   .mt-chat { max-height: 220px; }
   .hudcard { min-width: 0; max-width: 46vw; padding: 7px 9px; }
   .tl-task { font-size: 11.5px; }
-  .vaultbar { top: auto; bottom: 150px; left: 12px; transform: none; font-size: 11px; }
+  .vaultbar { font-size: 11px; }
+  .vaultbar .bar { width: 90px; }
   .abtn { width: 70px; height: 70px; }
   .abtn svg { width: 30px; height: 30px; }
   .hide-sm { display: none; }
@@ -427,3 +435,42 @@ canvas.game { width: 100%; height: 100%; display: block; touch-action: none; ima
 
 
 .error.floaterr { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 80; max-width: min(640px, calc(100% - 32px)); }
+.loglist.inline { width: 100%; max-height: 280px; margin: 0; padding: 0; border: 0; background: none; }
+.loglist.inline .logrow { grid-template-columns: 1fr auto 28px; }
+
+/* ---------- phones: the heist goes fullscreen + landscape (joystick left, buttons right).
+   .full = touch device mid-heist; .rot = still portrait, so the stage is turned 90° clockwise. */
+body:has(.stagewrap.full) { overflow: hidden; overscroll-behavior: none; }
+.stagewrap.full { position: fixed; inset: 0; margin: 0; border: 0; border-radius: 0; box-shadow: none; z-index: 45; min-height: 0; }
+.stagewrap.full.rot { inset: auto; top: 0; left: 0; width: 100dvh; height: 100vw; transform-origin: top left; transform: rotate(90deg) translateY(-100%); }
+.stagewrap.full .hud-tl { left: max(8px, env(safe-area-inset-left)); top: 8px; max-width: 48%; gap: 6px; }
+.stagewrap.full .backbtn { padding: 4px 10px; }
+.stagewrap.full .hudcard { min-width: 0; max-width: 250px; padding: 6px 9px; border-width: 2px; box-shadow: 0 3px 0 var(--ink); }
+.stagewrap.full .tasklist .tl-role { font-size: 13px; margin-bottom: 2px; }
+.stagewrap.full .tl-task { font-size: 11.5px; padding: 1px 0; }
+.stagewrap.full .vaultbar { font-size: 10.5px; padding: 4px 8px; gap: 6px; border-width: 2px; box-shadow: 0 3px 0 var(--ink); }
+.stagewrap.full .vaultbar .bar { width: 110px; height: 11px; }
+.stagewrap.full .timelock { font-size: 10.5px; }
+.stagewrap.full .hud-tr { top: 8px; right: max(8px, env(safe-area-inset-right)); gap: 6px; }
+.stagewrap.full .hud-tr .iconbtn { width: 36px; height: 36px; font-size: 15px; border-radius: 10px; }
+.stagewrap.full .hud-tr .phase-pill { display: none; }
+.stagewrap.full .actions { right: max(12px, env(safe-area-inset-right)); bottom: 12px; gap: 8px; }
+.stagewrap.full .abtn { width: 68px; height: 68px; }
+.stagewrap.full .abtn svg { width: 28px; height: 28px; }
+.stagewrap.full .joystick { display: block; left: max(18px, env(safe-area-inset-left)); bottom: 16px; width: 124px; height: 124px; background: #ffffff14; }
+.stagewrap.full .knob { left: 34px; top: 34px; }
+.stagewrap.full .hintbar { bottom: 12px; max-width: calc(100% - 380px); font-size: 12px; padding: 5px 6px 5px 12px; border-width: 2px; }
+.stagewrap.full .roombanner { top: 46px; font-size: 22px; }
+.stagewrap.full .toast { top: 52px; max-width: 56%; font-size: 13px; }
+.stagewrap.full .minimap-wrap, .stagewrap.full .taskpanel-wrap, .stagewrap.full .meeting-wrap { padding: 6px; }
+.stagewrap.full { container-type: size; }
+.stagewrap.full .minimap { width: min(620px, 100%, calc((100cqh - 60px) * 40 / 24 + 24px)); padding: 8px; }
+.stagewrap.full .minimap .small { font-size: 11px; }
+.stagewrap.full .tasklist .small { font-size: 11px; }
+.stagewrap.full .taskpanel { padding: 10px 12px; gap: 8px; max-height: calc(100% - 4px); overflow: auto; }
+.stagewrap.full .tp-stage { min-height: 150px; }
+.stagewrap.full .mt-body { grid-template-columns: minmax(0, 1.4fr) minmax(200px, 1fr); }
+.stagewrap.full .mt-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.stagewrap.full .mt-card { min-height: 52px; }
+.stagewrap.full .mt-chat { max-height: none; }
+.stagewrap.full .drawer { top: 6px; bottom: 6px; right: 6px; }

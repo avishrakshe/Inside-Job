@@ -5,13 +5,23 @@
 import { MAXP, ViewState, ROLE_MOLE, ROLE_CREW } from "../chain/decode";
 import { BUTTON, MAP_H, MAP_W, ROOM_NAMES, STATIONS, TASK_TICKS, TILE, TILES, canSee } from "./map";
 import { drawCuffed, drawRobber, shade, star } from "./sprites";
+import { drawAnimated, getMap, LABELS } from "./mapart";
 
 export const SEAT_COLORS = ["#ff4d6d", "#4dabff", "#3ddc97", "#ffd23f", "#b388ff", "#ff9f43", "#2de2e6", "#ff7ac6"];
 export const COLOR_NAMES = ["Red", "Blue", "Green", "Yellow", "Violet", "Orange", "Cyan", "Pink"];
 
 const MAP_PX_W = MAP_W * TILE;
 const MAP_PX_H = MAP_H * TILE;
-const PRE = 2; // pre-render pixel density
+
+/** Centre of each room (minimap labels). */
+const ROOM_CENTERS: { x: number; y: number }[] = (() => {
+  const acc = ROOM_NAMES.map(() => ({ x: 0, y: 0, n: 0 }));
+  for (let ty = 0; ty < MAP_H; ty++) for (let tx = 0; tx < MAP_W; tx++) {
+    const a = acc[TILES[ty * MAP_W + tx]];
+    if (a) { a.x += tx; a.y += ty; a.n++; }
+  }
+  return acc.map((a) => (a.n ? { x: (a.x / a.n + 0.5) * TILE, y: (a.y / a.n + 0.5) * TILE } : { x: 0, y: 0 }));
+})();
 
 export interface RenderInput {
   view: ViewState | null;
@@ -23,235 +33,6 @@ export interface RenderInput {
   t: number;
   follow: boolean;
   dpr?: number;
-}
-
-// ------------------------------------------------------------------ static map
-
-let mapCanvas: HTMLCanvasElement | null = null;
-const tile = (tx: number, ty: number) => (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H ? 0 : TILES[ty * MAP_W + tx]);
-const isFloor = (tx: number, ty: number) => tile(tx, ty) !== 0;
-
-function hash(a: number, b: number) {
-  let h = (a * 374761393 + b * 668265263) | 0;
-  h = (h ^ (h >>> 13)) * 1274126177;
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
-}
-
-function floorTile(g: CanvasRenderingContext2D, r: number, tx: number, ty: number) {
-  const x = tx * TILE, y = ty * TILE;
-  const n = hash(tx, ty);
-  switch (r) {
-    case 1: { // Security: blue ceramic tiles
-      g.fillStyle = "#1c2a40"; g.fillRect(x, y, TILE, TILE);
-      g.fillStyle = "#22344f"; g.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
-      g.fillStyle = "rgba(255,255,255,0.03)"; g.fillRect(x + 2, y + 2, TILE - 4, 6);
-      break;
-    }
-    case 2: { // Server room: perforated raised floor
-      g.fillStyle = "#13242b"; g.fillRect(x, y, TILE, TILE);
-      g.strokeStyle = "#0c181d"; g.lineWidth = 1; g.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
-      g.fillStyle = "#1b323b";
-      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) g.fillRect(x + 5 + i * 7, y + 5 + j * 7, 2, 2);
-      break;
-    }
-    case 3: { // Vault: gold diamond plate
-      g.fillStyle = "#2e2715"; g.fillRect(x, y, TILE, TILE);
-      g.strokeStyle = "#3d331a"; g.lineWidth = 1.5;
-      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
-        const cx = x + 4 + i * 8, cy = y + 4 + j * 8;
-        g.beginPath(); g.moveTo(cx - 2, cy + (i + j) % 2 * 2 - 1); g.lineTo(cx + 2, cy - (i + j) % 2 * 2 + 1); g.stroke();
-      }
-      break;
-    }
-    case 4: { // Lobby: marble checker + red carpet down the middle
-      const carpet = tx >= 17 && tx <= 21;
-      if (carpet) {
-        g.fillStyle = "#5c1a28"; g.fillRect(x, y, TILE, TILE);
-        g.fillStyle = "#6a2232"; for (let k = 0; k < 4; k++) g.fillRect(x, y + k * 8 + 3, TILE, 1);
-        if (tx === 17) { g.fillStyle = "#c9a227"; g.fillRect(x + 2, y, 3, TILE); }
-        if (tx === 21) { g.fillStyle = "#c9a227"; g.fillRect(x + TILE - 5, y, 3, TILE); }
-      } else {
-        g.fillStyle = (tx + ty) % 2 ? "#2b2e38" : "#22252e"; g.fillRect(x, y, TILE, TILE);
-        g.strokeStyle = "rgba(255,255,255,0.05)"; g.lineWidth = 1;
-        g.beginPath(); g.moveTo(x + n * 20, y); g.lineTo(x + 10 + n * 18, y + TILE); g.stroke();
-      }
-      break;
-    }
-    case 5: { // Laser hall: glossy black
-      g.fillStyle = "#15101a"; g.fillRect(x, y, TILE, TILE);
-      g.strokeStyle = "rgba(255,60,90,0.08)"; g.lineWidth = 1; g.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
-      g.fillStyle = "rgba(255,255,255,0.025)"; g.fillRect(x + 4, y + 4, 10, 3);
-      break;
-    }
-    case 6: { // Deposit boxes: wooden parquet
-      g.fillStyle = "#3b2a1b"; g.fillRect(x, y, TILE, TILE);
-      g.strokeStyle = "#2c1f13"; g.lineWidth = 1;
-      if ((tx + ty) % 2) for (let k = 1; k < 4; k++) { g.beginPath(); g.moveTo(x + k * 8, y); g.lineTo(x + k * 8, y + TILE); g.stroke(); }
-      else for (let k = 1; k < 4; k++) { g.beginPath(); g.moveTo(x, y + k * 8); g.lineTo(x + TILE, y + k * 8); g.stroke(); }
-      break;
-    }
-    case 7: { // Sewer: wet stone with a water channel
-      const water = ty === 21;
-      g.fillStyle = water ? "#0f3a36" : "#1b2620"; g.fillRect(x, y, TILE, TILE);
-      if (!water) {
-        g.strokeStyle = "#141d18"; g.lineWidth = 1;
-        g.strokeRect(x + 0.5 + (ty % 2) * 8, y + 0.5, 16, 15); g.strokeRect(x + 16.5 - (ty % 2) * 8, y + 16.5, 16, 15);
-        if (n > 0.8) { g.fillStyle = "#2a3d22"; g.beginPath(); g.ellipse(x + 10, y + 20, 5, 3, 0, 0, 7); g.fill(); }
-      }
-      break;
-    }
-    default: { // Corridor: metal grate
-      g.fillStyle = "#1a1f29"; g.fillRect(x, y, TILE, TILE);
-      g.fillStyle = "#222836";
-      for (let k = 0; k < 8; k++) g.fillRect(x + 1, y + k * 4 + 1, TILE - 2, 2);
-      // hazard stripes at doorways
-      const edge = (dx: number, dy: number) => { const t2 = tile(tx + dx, ty + dy); return t2 !== 0 && t2 !== 8; };
-      g.save();
-      g.beginPath(); g.rect(x, y, TILE, TILE); g.clip();
-      const hz = (rx: number, ry: number, w: number, h: number) => {
-        g.fillStyle = "#e0b31a"; g.fillRect(rx, ry, w, h);
-        g.fillStyle = "#14161c";
-        for (let k = -40; k < 40; k += 8) { g.beginPath(); g.moveTo(rx + k, ry); g.lineTo(rx + k + 4, ry); g.lineTo(rx + k + 4 + h, ry + h); g.lineTo(rx + k + h, ry + h); g.fill(); }
-      };
-      if (edge(0, -1)) hz(x, y, TILE, 4);
-      if (edge(0, 1)) hz(x, y + TILE - 4, TILE, 4);
-      if (edge(-1, 0)) hz(x, y, 4, TILE);
-      if (edge(1, 0)) hz(x + TILE - 4, y, 4, TILE);
-      g.restore();
-    }
-  }
-}
-
-function wallTile(g: CanvasRenderingContext2D, tx: number, ty: number) {
-  const x = tx * TILE, y = ty * TILE;
-  const below = tile(tx, ty + 1);
-  g.fillStyle = "#0b0f19"; g.fillRect(x, y, TILE, TILE);
-  if (below !== 0) {
-    // the wall's front face, decorated for the room it faces
-    const FACE = ["", "#25324a", "#17262c", "#3a3220", "#2c2f3b", "#241626", "#4a3822", "#1e2b22", "#262d3b"];
-    g.fillStyle = "#1a2234"; g.fillRect(x, y, TILE, 9);
-    g.fillStyle = FACE[below] || "#262d3b"; g.fillRect(x, y + 9, TILE, TILE - 9);
-    g.fillStyle = "rgba(0,0,0,0.35)"; g.fillRect(x, y + TILE - 3, TILE, 3);
-    const fy = y + 9;
-    switch (below) {
-      case 1: // monitor wall
-        for (const k of [0, 1]) {
-          g.fillStyle = "#0b1220"; g.fillRect(x + 2 + k * 15, fy + 3, 13, 11);
-          g.fillStyle = hash(tx, k) > 0.5 ? "#1e6fb8" : "#185a8a"; g.fillRect(x + 3 + k * 15, fy + 4, 11, 9);
-          g.fillStyle = "rgba(255,255,255,0.18)"; g.fillRect(x + 3 + k * 15, fy + 6, 11, 1);
-        }
-        break;
-      case 2: // server racks
-        g.fillStyle = "#0b1114"; g.fillRect(x + 2, fy + 1, TILE - 4, TILE - 12);
-        g.fillStyle = "#18242a"; for (let k = 0; k < 4; k++) g.fillRect(x + 4, fy + 3 + k * 4, TILE - 8, 2);
-        break;
-      case 3: // vault: riveted steel
-        g.fillStyle = "#5a4a24"; for (let k = 0; k < 4; k++) { g.beginPath(); g.arc(x + 4 + k * 8, fy + 3, 1.2, 0, 7); g.fill(); }
-        g.fillStyle = "#4a3f22"; g.fillRect(x, fy + 8, TILE, 2);
-        break;
-      case 4: // lobby: framed paintings
-        if (tx % 3 === 0) {
-          g.fillStyle = "#c9a227"; g.fillRect(x + 6, fy + 2, 20, 15);
-          g.fillStyle = ["#2a4a6a", "#5a2a3a", "#2a5a4a"][tx % 3 === 0 ? (tx / 3) % 3 : 0]; g.fillRect(x + 8, fy + 4, 16, 11);
-          g.fillStyle = "rgba(255,255,255,0.2)"; g.beginPath(); g.arc(x + 19, fy + 8, 2, 0, 7); g.fill();
-        }
-        break;
-      case 5: // laser emitters
-        if (tx % 2 === 0) { g.fillStyle = "#3a2232"; g.fillRect(x + 10, fy + 4, 12, 8); g.fillStyle = "#ff3355"; g.beginPath(); g.arc(x + 16, fy + 8, 2, 0, 7); g.fill(); }
-        break;
-      case 6: // safe-deposit boxes
-        for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) {
-          g.fillStyle = "#8a7448"; g.fillRect(x + 1 + i * 10.3, fy + 1 + j * 8, 9.3, 7);
-          g.fillStyle = "#3b2f19"; g.fillRect(x + 5 + i * 10.3, fy + 4 + j * 8, 2, 2);
-        }
-        break;
-      case 7: // pipes
-        g.fillStyle = "#3d4a3a"; g.fillRect(x, fy + 5, TILE, 5);
-        g.fillStyle = "#56664f"; g.fillRect(x, fy + 5, TILE, 1.5);
-        if (tx % 4 === 0) { g.fillStyle = "#3d4a3a"; g.fillRect(x + 12, fy, 6, TILE - 9); }
-        break;
-      default:
-        if (tx % 3 === 0) { g.fillStyle = "#ffe9a8"; g.fillRect(x + 12, fy + 3, 8, 3); }
-    }
-  } else {
-    // wall tops: subtle rim where a floor touches
-    g.strokeStyle = "#2a3550"; g.lineWidth = 2;
-    g.beginPath();
-    if (isFloor(tx, ty - 1)) { g.moveTo(x, y + 1); g.lineTo(x + TILE, y + 1); }
-    if (isFloor(tx - 1, ty)) { g.moveTo(x + 1, y); g.lineTo(x + 1, y + TILE); }
-    if (isFloor(tx + 1, ty)) { g.moveTo(x + TILE - 1, y); g.lineTo(x + TILE - 1, y + TILE); }
-    g.stroke();
-  }
-}
-
-function decor(g: CanvasRenderingContext2D) {
-  // the vault door
-  const vx = 34 * TILE + 16, vy = 30;
-  g.fillStyle = "#1b160b"; g.beginPath(); g.arc(vx, vy, 28, 0, 7); g.fill();
-  g.fillStyle = "#8f7a3f"; g.beginPath(); g.arc(vx, vy, 25, 0, 7); g.fill();
-  g.fillStyle = "#b39a52"; g.beginPath(); g.arc(vx, vy, 19, 0, 7); g.fill();
-  g.strokeStyle = "#5a4a24"; g.lineWidth = 2.5;
-  for (let k = 0; k < 6; k++) { const a = (k * Math.PI) / 3; g.beginPath(); g.moveTo(vx, vy); g.lineTo(vx + Math.cos(a) * 15, vy + Math.sin(a) * 15); g.stroke(); }
-  g.fillStyle = "#5a4a24"; g.beginPath(); g.arc(vx, vy, 5, 0, 7); g.fill();
-  // gold bars in the vault corners
-  const gold = (x: number, y: number) => {
-    for (let r = 0; r < 3; r++) for (let c = 0; c < 3 - r; c++) {
-      const bx = x + c * 11 + r * 5.5, by = y - r * 6;
-      g.fillStyle = "#c79a1e"; g.fillRect(bx, by, 10, 6);
-      g.fillStyle = "#ffd75a"; g.fillRect(bx + 1, by + 1, 8, 2);
-    }
-  };
-  gold(29 * TILE + 6, 6 * TILE + 18); gold(37 * TILE - 10, 6 * TILE + 18);
-  // money carts in deposit boxes
-  g.fillStyle = "#2e5e3a"; g.fillRect(34 * TILE, 15 * TILE + 6, 26, 16);
-  g.fillStyle = "#3f7d4d"; for (let k = 0; k < 3; k++) g.fillRect(34 * TILE + 2 + k * 8, 15 * TILE + 8, 6, 12);
-  // lobby: the emergency pedestal base
-  g.fillStyle = "#3a3f4c"; g.beginPath(); g.ellipse(BUTTON.x, BUTTON.y + 6, 20, 10, 0, 0, 7); g.fill();
-  g.fillStyle = "#4a5060"; g.beginPath(); g.ellipse(BUTTON.x, BUTTON.y + 3, 17, 8, 0, 0, 7); g.fill();
-  // security desk + chair
-  g.fillStyle = "#3a2e22"; g.fillRect(4 * TILE, 4 * TILE + 8, 64, 18);
-  g.fillStyle = "#4a3c2c"; g.fillRect(4 * TILE, 4 * TILE + 8, 64, 4);
-  // sewer: grates over the water
-  for (const gx of [9, 19, 29]) {
-    g.fillStyle = "#3a3f4c"; g.fillRect(gx * TILE, 21 * TILE, TILE, TILE);
-    g.fillStyle = "#1b1f28"; for (let k = 0; k < 5; k++) g.fillRect(gx * TILE + 3 + k * 6, 21 * TILE + 2, 3, TILE - 4);
-  }
-}
-
-function prerender(): HTMLCanvasElement {
-  const c = document.createElement("canvas");
-  c.width = MAP_PX_W * PRE;
-  c.height = MAP_PX_H * PRE;
-  const g = c.getContext("2d")!;
-  g.scale(PRE, PRE);
-  g.fillStyle = "#06080d";
-  g.fillRect(0, 0, MAP_PX_W, MAP_PX_H);
-  for (let ty = 0; ty < MAP_H; ty++) for (let tx = 0; tx < MAP_W; tx++) {
-    const r = TILES[ty * MAP_W + tx];
-    if (r !== 0) floorTile(g, r, tx, ty);
-  }
-  decor(g);
-  for (let ty = 0; ty < MAP_H; ty++) for (let tx = 0; tx < MAP_W; tx++) if (TILES[ty * MAP_W + tx] === 0) wallTile(g, tx, ty);
-  // room nameplates painted on the floor
-  g.textAlign = "center";
-  g.textBaseline = "middle";
-  g.font = "16px Bungee, Impact, sans-serif";
-  for (const [r, lx, ly] of LABELS) {
-    g.fillStyle = "rgba(255,255,255,0.07)";
-    g.fillText(ROOM_NAMES[r].toUpperCase(), lx * TILE, ly * TILE);
-  }
-  return c;
-}
-
-const LABELS: [number, number, number][] = [[1, 5, 5.6], [2, 19, 4.4], [3, 34, 4.6], [4, 15, 13.7], [5, 5, 12.5], [6, 34, 12.5], [7, 20, 20.2]];
-
-export function getMap(): HTMLCanvasElement {
-  if (!mapCanvas) mapCanvas = prerender();
-  return mapCanvas;
-}
-/** Fonts load late: drop the cache once so nameplates use Bungee. */
-if (typeof document !== "undefined" && (document as any).fonts?.ready) {
-  (document as any).fonts.ready.then(() => { mapCanvas = null; });
 }
 
 // ------------------------------------------------------------------ animation state
@@ -316,7 +97,7 @@ export function draw(ctx: CanvasRenderingContext2D, w: number, h: number, inp: R
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(getMap(), 0, 0, MAP_PX_W, MAP_PX_H);
 
-  animatedDecor(ctx, t);
+  drawAnimated(ctx, t);
   drawStations(ctx, v, t);
   drawButton(ctx, t);
 
@@ -369,8 +150,8 @@ export function draw(ctx: CanvasRenderingContext2D, w: number, h: number, inp: R
       const i = (ty * MAP_W + tx) * 4;
       const cx = tx * TILE + TILE / 2, cy = ty * TILE + TILE / 2;
       const lit = me ? TILES[ty * MAP_W + tx] !== 0 && canSee(me.x, me.y, cx, cy) : false;
-      d[i] = 2; d[i + 1] = 3; d[i + 2] = 8;
-      d[i + 3] = lit ? 0 : me ? 228 : 150;
+      d[i] = 6; d[i + 1] = 8; d[i + 2] = 16;
+      d[i + 3] = lit ? 0 : me ? 212 : 140;
     }
     fogCanvas.getContext("2d")!.putImageData(fogData!, 0, 0);
     ctx.imageSmoothingEnabled = true;
@@ -433,39 +214,6 @@ function arrow(ctx: CanvasRenderingContext2D, x: number, y: number, ang: number,
   ctx.moveTo(12, 0); ctx.lineTo(-6, -9); ctx.lineTo(-2, 0); ctx.lineTo(-6, 9);
   ctx.closePath();
   ctx.fill(); ctx.stroke();
-  ctx.restore();
-}
-
-function animatedDecor(ctx: CanvasRenderingContext2D, t: number) {
-  // laser grid sweeping the laser hall
-  ctx.save();
-  ctx.globalCompositeOperation = "lighter";
-  for (let k = 0; k < 3; k++) {
-    const y = (9.4 + 2.4 * k + Math.sin(t / 900 + k * 2.1) * 0.9) * TILE;
-    ctx.strokeStyle = "rgba(255,40,80,0.18)"; ctx.lineWidth = 6;
-    ctx.beginPath(); ctx.moveTo(1 * TILE, y); ctx.lineTo(10 * TILE, y); ctx.stroke();
-    ctx.strokeStyle = "rgba(255,90,120,0.75)"; ctx.lineWidth = 1.2;
-    ctx.beginPath(); ctx.moveTo(1 * TILE, y); ctx.lineTo(10 * TILE, y); ctx.stroke();
-  }
-  // server LEDs
-  for (let tx = 13; tx <= 25; tx++) for (let k = 0; k < 4; k++) {
-    const on = Math.sin(t / (140 + ((tx * 7 + k * 13) % 9) * 40) + tx * k) > 0.2;
-    if (!on) continue;
-    ctx.fillStyle = (tx + k) % 3 === 0 ? "#3ddc97" : (tx + k) % 3 === 1 ? "#4dabff" : "#ffd23f";
-    ctx.fillRect(tx * TILE + 6 + ((k * 7) % 18), 9 + 3 + k * 4, 2, 1.5);
-  }
-  // security monitors flicker
-  for (let tx = 1; tx <= 9; tx++) {
-    const f = 0.06 + 0.06 * Math.sin(t / 90 + tx * 3);
-    ctx.fillStyle = `rgba(120,200,255,${f})`;
-    ctx.fillRect(tx * TILE + 3, 13, 26, 9);
-  }
-  // sewer water shimmer
-  for (let k = 0; k < 14; k++) {
-    const x = 5 * TILE + ((t / 30 + k * 71) % (30 * TILE));
-    ctx.fillStyle = "rgba(120,255,220,0.12)";
-    ctx.fillRect(x, 21 * TILE + 6 + (k % 4) * 6, 14, 1.5);
-  }
   ctx.restore();
 }
 
@@ -541,14 +289,19 @@ export function drawMinimap(ctx: CanvasRenderingContext2D, w: number, h: number,
   ctx.globalAlpha = 0.9;
   ctx.drawImage(getMap(), 0, 0, MAP_PX_W, MAP_PX_H);
   ctx.globalAlpha = 1;
-  ctx.fillStyle = "rgba(10,20,40,0.45)";
+  ctx.fillStyle = "rgba(10,20,40,0.35)";
   ctx.fillRect(0, 0, MAP_PX_W, MAP_PX_H);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.font = "22px Bungee, Impact, sans-serif";
-  for (const [r, lx, ly] of LABELS) {
-    ctx.fillStyle = "rgba(255,255,255,0.85)";
-    ctx.fillText(ROOM_NAMES[r].toUpperCase(), lx * TILE, (ly - 0.6) * TILE);
+  ctx.font = "24px Bungee, Impact, sans-serif";
+  ctx.lineJoin = "round";
+  for (const [r] of LABELS) {
+    const c = { x: ROOM_CENTERS[r].x, y: ROOM_CENTERS[r].y - (r === 4 ? 56 : 0) }; // keep the lobby name off the alarm star
+    ctx.lineWidth = 7;
+    ctx.strokeStyle = "#0b0f18";
+    ctx.strokeText(ROOM_NAMES[r].toUpperCase(), c.x, c.y);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(ROOM_NAMES[r].toUpperCase(), c.x, c.y);
   }
   if (v && v.role !== 255) {
     v.taskSt.forEach((st, k) => {

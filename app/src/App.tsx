@@ -29,6 +29,7 @@ export default function App() {
   const [name, setName] = useState(() => { try { return localStorage.getItem("ij.name") || ""; } catch { return ""; } });
   const [active, setActive] = useState<{ id: number; spectate: boolean } | null>(null);
   const [txs, setTxs] = useState<TxEvent[]>([]);
+  const txTotals = useRef({ all: 0, acts: 0 });
   const [busy, setBusy] = useState<number | null>(null);
   const [how, setHow] = useState(false);
   const [flow, setFlow] = useState<StakeFlow | null>(null);
@@ -47,7 +48,11 @@ export default function App() {
     const off = client.onTx((e) => setTxs((prev) => {
       const i = prev.findIndex((p) => p.sig === e.sig);
       if (i >= 0) { const n = [...prev]; n[i] = { ...n[i], ...e }; return n; }
-      return [e, ...prev].slice(0, 200);
+      txTotals.current.all++;
+      if (e.label === "act") txTotals.current.acts++;
+      // moves stream at 10/s: cap them, but never let them push joins/chats/votes out of the log
+      let acts = 0;
+      return [e, ...prev].filter((t) => t.label !== "act" || ++acts <= 120).slice(0, 220);
     }));
     return off;
   }, [client]);
@@ -85,10 +90,13 @@ export default function App() {
   }, [client, active]);
 
   // rejoin automatically if this browser already holds a seat somewhere
+  // (skip a room you just left: the cached list still shows your seat until the next poll)
+  const justLeft = useRef({ id: 0, at: 0 });
   useEffect(() => {
     if (!client || active) return;
     const me = client.pubkey.toBase58();
-    const r = Object.values(rooms).find((x) => x && x.players.includes(me));
+    const recent = Date.now() - justLeft.current.at < 15_000;
+    const r = Object.values(rooms).find((x) => x && x.players.includes(me) && !(recent && x.roomId === justLeft.current.id));
     if (r) setActive({ id: r.roomId, spectate: false });
   }, [rooms, client, active]);
 
@@ -231,7 +239,7 @@ export default function App() {
         </header>
       )}
 
-      {err && <div className={`error ${active ? "" : "floaterr"}`} onClick={() => setErr("")}>{err} <span className="muted">(tap to dismiss)</span></div>}
+      {err && <div className="error floaterr" onClick={() => setErr("")}>{err} <span className="muted">(tap to dismiss)</span></div>}
 
       {!active && (
         <Landing
@@ -265,13 +273,14 @@ export default function App() {
 
       {client && active && (
         <Suspense fallback={<div className="loading"><div className="spinner" />Loading the heist…</div>}>
-          <RoomScreen client={client} roomId={active.id} spectate={active.spectate} wallet={w.wallet} onConnectWallet={w.connect} onExit={() => setActive(null)} />
+          <RoomScreen client={client} roomId={active.id} spectate={active.spectate} wallet={w.wallet} onConnectWallet={w.connect} onExit={() => { justLeft.current = { id: active.id, at: Date.now() }; setActive(null); }} txs={txs} txTotals={txTotals.current} />
         </Suspense>
       )}
 
       {how && <HowTo onClose={() => setHow(false)} />}
       {flow && <StakeFlowModal flow={flow} onClose={() => setFlow(null)} />}
-      <ChainLog txs={txs} />
+      {/* in a room the log lives in the 🔒 drawer, so it can never cover the game */}
+      {!active && <ChainLog txs={txs} totals={txTotals.current} />}
     </div>
   );
 }

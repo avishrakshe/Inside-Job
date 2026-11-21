@@ -13,13 +13,47 @@ import { Chat, CheatConsole, SealMatrix, VerifyBox } from "./Proof";
 import { PotPanel } from "./Pot";
 import { WalletState, sol } from "./wallet";
 import { trackEvent } from "../analytics";
+import ChainLog from "./ChainLog";
+import type { TxEvent } from "../chain/client";
 
 const IN_USE = 1 << 4, IN_CUFF = 1 << 5, IN_REPORT = 1 << 6, IN_EMERGENCY = 1 << 7;
 const F_CAN_USE = 1, F_CAN_REPORT = 2, F_CAN_CUFF = 4, F_AT_BUTTON = 8;
 
-interface Props { client: GameClient; roomId: number; spectate: boolean; wallet: WalletState | null; onConnectWallet: () => Promise<WalletState>; onExit: () => void }
+function useMedia(q: string) {
+  const [m, setM] = useState(() => typeof matchMedia !== "undefined" && matchMedia(q).matches);
+  useEffect(() => {
+    const mq = matchMedia(q);
+    const f = () => setM(mq.matches);
+    f();
+    mq.addEventListener("change", f);
+    return () => mq.removeEventListener("change", f);
+  }, [q]);
+  return m;
+}
 
-export default function RoomScreen({ client, roomId, spectate, wallet, onConnectWallet, onExit }: Props) {
+/** Phones: go fullscreen + lock landscape on the first tap of a heist (Android). iOS can't lock, so CSS rotates the stage instead. */
+let landscapeTried = false;
+function tryLandscape() {
+  if (landscapeTried) return;
+  landscapeTried = true;
+  const el = document.documentElement as any;
+  const fs = el.requestFullscreen?.({ navigationUI: "hide" }) ?? el.webkitRequestFullscreen?.();
+  Promise.resolve(fs)
+    .then(() => (screen.orientation as any)?.lock?.("landscape"))
+    .catch(() => {});
+}
+function leaveLandscape() {
+  landscapeTried = false;
+  try { (screen.orientation as any)?.unlock?.(); } catch { /* ignore */ }
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+
+interface Props { client: GameClient; roomId: number; spectate: boolean; wallet: WalletState | null; onConnectWallet: () => Promise<WalletState>; onExit: () => void; txs: TxEvent[]; txTotals: { all: number; acts: number } }
+
+export default function RoomScreen({ client, roomId, spectate, wallet, onConnectWallet, onExit, txs, txTotals }: Props) {
+  // ?touch=1 forces the phone layout (QA on a desktop browser)
+  const touch = useMedia("(pointer: coarse)") || /[?&]touch=1/.test(location.search);
+  const portrait = useMedia("(orientation: portrait)");
   const [room, setRoom] = useState<RoomState | null>(null);
   const [view, setView] = useState<ViewState | null>(null);
   const [world, setWorld] = useState<WorldState | null>(null);
@@ -172,6 +206,13 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
     prevCd.current = view.killCd;
   }, [view, room]);
 
+  // phones play the heist fullscreen and sideways: joystick left, buttons right
+  const inHeist = !!room && room.phase >= PH.PLAY && room.phase <= PH.RESULT;
+  const full = touch && inHeist;
+  const rot = full && portrait;
+  useEffect(() => { if (!full) leaveLandscape(); }, [full]);
+  useEffect(() => () => leaveLandscape(), []);
+
   if (!room) return <div className="loading"><div className="spinner" />Reading crew #{roomId} from the rollup…</div>;
 
   const leave = async () => {
@@ -181,12 +222,12 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
 
   return (
     <div className="roomscreen">
-      <div className="stagewrap">
+      <div className={`stagewrap ${full ? "full" : ""} ${rot ? "rot" : ""}`} onPointerUp={full ? tryLandscape : undefined}>
         {room.phase === PH.LOBBY && <LobbyScreen client={client} room={room} seat={seat} seated={seated} roomId={roomId} onLeave={leave} onProof={() => setDrawer(true)} />}
         {room.phase === PH.STARTING && <Dealing room={room} canFallback={seated} onFallback={() => client.fallbackDeal(roomId).catch(() => {})} />}
         {room.phase >= PH.PLAY && (
           <GameView client={client} room={room} view={view} seat={seat} seated={seated} roomId={roomId} world={world}
-            onLeave={leave} onProof={() => setDrawer((d) => !d)} blocked={roleShow || splash || cuffed} />
+            onLeave={leave} onProof={() => setDrawer((d) => !d)} blocked={roleShow || splash || cuffed} isTouch={touch} />
         )}
         {room.phase === PH.MEETING && !splash && <MeetingScreen client={client} room={room} view={view} seat={seat} seated={seated} roomId={roomId} />}
         {room.phase === PH.RESULT && <EjectScene room={room} since={resultSince || Date.now()} />}
@@ -211,15 +252,16 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
         {splash && room.phase === PH.MEETING && <MeetingSplash room={room} />}
         {cuffed && <CuffedScreen seat={seat} />}
         {flash && <CuffFlash />}
+        {drawer && (
+          <div className="drawer">
+            <div className="drawer-head"><b>PROOF</b><button className="xbtn" onClick={() => setDrawer(false)}>✕</button></div>
+            <SealMatrix />
+            <CheatConsole client={client} roomId={roomId} seat={seated ? seat : -1} />
+            {room.phase === PH.REVEALED && <VerifyBox room={room} report={report} />}
+            <ChainLog txs={txs} totals={txTotals} inline />
+          </div>
+        )}
       </div>
-      {drawer && (
-        <div className="drawer">
-          <div className="drawer-head"><b>PROOF</b><button className="xbtn" onClick={() => setDrawer(false)}>✕</button></div>
-          <SealMatrix />
-          <CheatConsole client={client} roomId={roomId} seat={seated ? seat : -1} />
-          {room.phase === PH.REVEALED && <VerifyBox room={room} report={report} />}
-        </div>
-      )}
     </div>
   );
 }
@@ -319,9 +361,9 @@ function LobbyScreen({ client, room, seat, seated, roomId, onLeave, onProof }: {
 
 // ------------------------------------------------------------------ the heist
 
-function GameView({ client, room, view, seat, seated, roomId, world, onLeave, onProof, blocked }: {
+function GameView({ client, room, view, seat, seated, roomId, world, onLeave, onProof, blocked, isTouch }: {
   client: GameClient; room: RoomState; view: ViewState | null; seat: number; seated: boolean; roomId: number; world: WorldState | null;
-  onLeave: () => void; onProof: () => void; blocked: boolean;
+  onLeave: () => void; onProof: () => void; blocked: boolean; isTouch: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const keys = useRef<Record<string, boolean>>({});
@@ -454,14 +496,12 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
     const frame = (t: number) => {
       const c = canvasRef.current;
       if (c) {
-        // pixel-art look: render at half resolution, scale up with nearest-neighbour (CSS)
-        const dpr = 0.5;
+        // crisp on every screen, capped so big phones don't burn the GPU
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
         const w = c.clientWidth, h = c.clientHeight;
         if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
         const ctx = c.getContext("2d")!;
-        ctx.imageSmoothingEnabled = false;
         ctx.save();
-        ctx.scale(dpr, dpr);
         const r = roomRef.current;
         const showAll = r.phase === PH.REVEALED && world ? { x: world.x, y: world.y, role: world.role, alive: world.alive } : null;
         draw(ctx, w, h, { view: seated ? viewRef.current : null, me: seated ? pred.current : null, names: r.names, seat: seated ? seat : -1, showAll, t, follow: seated, dpr });
@@ -475,6 +515,11 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
 
   const flags = view?.flags ?? 0;
   const press = (bit: number) => { edges.current |= bit; };
+  /** Fire on touch-down (not click) so a button works while the other thumb is on the joystick. */
+  const tap = (fn: () => void) => ({
+    onPointerDown: (e: React.PointerEvent) => { e.preventDefault(); fn(); },
+    onKeyDown: (e: React.KeyboardEvent) => { if (e.key === "Enter") fn(); },
+  });
   const mole = view?.role === ROLE_MOLE;
   const alive = view?.alive === 1;
   const nearMine = !!view && !!pred.current && view.taskSt.some((st, k) => {
@@ -491,11 +536,13 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
 
       {/* top HUD */}
       <div className="hud-tl">
-        <button className="btn ghost sm" onClick={onLeave}>←</button>
-        {seated && view && (view.role === ROLE_CREW || view.role === ROLE_MOLE) && <TaskList view={view} room={room} />}
-        {!seated && <div className="hudcard"><b>SPECTATING</b><div className="muted small">Positions are sealed in the enclave until lights-on. You see only the public Room.</div></div>}
+        <button className="btn ghost sm backbtn" onClick={onLeave} aria-label="Leave">←</button>
+        <div className="hud-col">
+          <VaultBar room={room} />
+          {seated && view && (view.role === ROLE_CREW || view.role === ROLE_MOLE) && <TaskList view={view} room={room} />}
+          {!seated && <div className="hudcard"><b>SPECTATING</b><div className="muted small">Positions are sealed in the enclave until lights-on. You see only the public Room.</div></div>}
+        </div>
       </div>
-      <VaultBar room={room} />
       <div className="hud-tr">
         <span className={`phase-pill p${room.phase}`}>{PHASE_NAME[room.phase]}</span>
         <button className="iconbtn" title="Map (M)" onClick={() => setMapOpen((o) => !o)}>🗺</button>
@@ -509,6 +556,9 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
       {seated && room.phase === PH.PLAY && view && view.tick < 260 && !hintOff && (view.role === ROLE_CREW || view.role === ROLE_MOLE) && (
         <div className="hintbar">
           {view.alive === 0 ? <span>You're a ghost: float through walls and finish your tasks.</span>
+            : isTouch ? (view.role === ROLE_MOLE
+              ? <span>Stand at a console + <span className="k">USE</span> to fake it · <span className="k">CUFF</span> when nobody's watching</span>
+              : <span>Follow the <b style={{ color: "var(--gold)" }}>yellow arrows</b> · tap <span className="k">USE</span> at a glowing console</span>)
             : view.role === ROLE_MOLE ? <span>Stand at a console + <span className="k">E</span> to fake it · <span className="k">Q</span> cuffs crew when nobody's watching</span>
             : <span>Follow the <b style={{ color: "var(--gold)" }}>yellow arrows</b> · <span className="k">E</span> at a glowing console · <span className="k">R</span> reports a body</span>}
           <button onClick={dismissHints} aria-label="hide hints">✕</button>
@@ -518,21 +568,21 @@ function GameView({ client, room, view, seat, seated, roomId, world, onLeave, on
       {seated && room.phase === PH.PLAY && view && (
         <div className="actions">
           {mole && alive && (
-            <button className={`abtn cuff ${flags & F_CAN_CUFF ? "ready" : ""}`} onClick={() => press(IN_CUFF)} style={{ ["--cd" as any]: Math.min(1, view.killCd / 380) }}>
+            <button className={`abtn cuff ${flags & F_CAN_CUFF ? "ready" : ""}`} {...tap(() => press(IN_CUFF))} style={{ ["--cd" as any]: Math.min(1, view.killCd / 380) }}>
               <IconCuff />{view.killCd > 0 && <span className="cdnum">{Math.ceil(view.killCd / 10)}</span>}<small>CUFF · Q</small>
             </button>
           )}
           {alive && (
-            <button className={`abtn report ${flags & F_CAN_REPORT ? "ready" : ""}`} onClick={() => press(IN_REPORT)}>
+            <button className={`abtn report ${flags & F_CAN_REPORT ? "ready" : ""}`} {...tap(() => press(IN_REPORT))}>
               <IconMega /><small>REPORT · R</small>
             </button>
           )}
           {alive && (
-            <button className={`abtn alarm ${flags & F_AT_BUTTON ? "ready" : ""}`} onClick={() => press(IN_EMERGENCY)}>
+            <button className={`abtn alarm ${flags & F_AT_BUTTON ? "ready" : ""}`} {...tap(() => press(IN_EMERGENCY))}>
               <IconBell /><small>ALARM · F</small>
             </button>
           )}
-          <button className={`abtn use ${canUse ? "ready" : ""}`} onClick={tryUse}>
+          <button className={`abtn use ${canUse ? "ready" : ""}`} {...tap(tryUse)}>
             <IconHand /><small>USE · E</small>
           </button>
         </div>
@@ -565,17 +615,22 @@ function VaultBar({ room }: { room: RoomState }) {
 function TaskList({ view, room }: { view: ViewState; room: RoomState }) {
   const mole = view.role === ROLE_MOLE;
   const partners = Array.from({ length: MAXP }, (_, i) => i).filter((i) => view.partnerMask & (1 << i));
+  const [open, setOpen] = useState(true);
+  const left = view.taskProg.filter((p) => p !== 255).length;
   return (
-    <div className={`hudcard tasklist ${mole ? "mole" : ""}`}>
-      <div className="tl-role">{mole ? "MOLE" : "CREW"}{view.alive === 0 && <span className="tag ghost">{mole ? "caught" : "ghost"}</span>}</div>
-      {mole ? (
+    <div className={`hudcard tasklist ${mole ? "mole" : ""} ${open ? "" : "shut"}`}>
+      <button className="tl-role" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        {mole ? "MOLE" : "CREW"}{view.alive === 0 && <span className="tag ghost">{mole ? "caught" : "ghost"}</span>}
+        <span className="tl-count">{mole ? "fake tasks" : `${left} left`} {open ? "▴" : "▾"}</span>
+      </button>
+      {open && (mole ? (
         <div className="small">
           <div className="mole">Cuff the crew when nobody's watching.</div>
           {partners.length > 0 && <div>Partner: {partners.map((p) => <b key={p} style={{ color: SEAT_COLORS[p] }}>{room.names[p]} </b>)}</div>}
           <div className="muted">Fake tasks:</div>
         </div>
-      ) : view.alive === 0 ? <div className="small muted">You're a ghost. Finish your tasks!</div> : null}
-      {view.taskSt.map((st, k) => {
+      ) : view.alive === 0 ? <div className="small muted">You're a ghost. Finish your tasks!</div> : null)}
+      {open && view.taskSt.map((st, k) => {
         const done = view.taskProg[k] === 255;
         return (
           <div key={k} className={`tl-task ${done && !mole ? "done" : ""}`}>
@@ -638,8 +693,11 @@ function Joystick({ onChange }: { onChange: (v: { dx: number; dy: number }) => v
   const [knob, setKnob] = useState({ x: 0, y: 0 });
   const handle = (e: React.PointerEvent) => {
     const r = ref.current!.getBoundingClientRect();
-    const dx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
-    const dy = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
+    const sx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
+    const sy = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
+    // stage rotated 90° clockwise (portrait phone): screen → stage axes
+    const rotated = !!ref.current!.closest(".rot");
+    const dx = rotated ? sy : sx, dy = rotated ? -sx : sy;
     const m = Math.min(1, Math.hypot(dx, dy));
     const a = Math.atan2(dy, dx);
     setKnob({ x: Math.cos(a) * m * 34, y: Math.sin(a) * m * 34 });
