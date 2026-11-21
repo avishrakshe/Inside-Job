@@ -6,7 +6,7 @@ Built for **MagicBlock Solana Blitz v10 — Entertainment Finance**. Every move,
 
 | | |
 |---|---|
-| Play | **https://inside-job-six.vercel.app** (free tables: no wallet needed) |
+| Play | **https://inside-job-six.vercel.app** (free tables: no wallet needed; phones play in landscape) |
 | Program (devnet) | `9B5TZmBnskcBrZ1QMCuojqrDEn1dEsb3oVNtgvZ73R2U` |
 | Rollup | MagicBlock TEE devnet — `devnet-tee.magicblock.app`, validator `MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo` |
 | Live proof | checks against the live devnet TEE — [docs/E2E_DEVNET.md](docs/E2E_DEVNET.md) |
@@ -24,9 +24,21 @@ A crew of robbers cracks a vault in real time. One of them (two at 7–8 players
 
 - **Crew** — finish your three stations (hold `E`). When the vault bar fills, the crew wins.
 - **Mole** — cuff the crew when nobody's looking (`Q`), fake your tasks, survive the vote.
-- **Report** a body (`R`) or hit the **emergency button** in the lobby (`F`) → meeting. Chat is on-chain and only open during meetings. **Ballots are sealed** in the World and published all at once at the tally.
+- **Report** a body (`R`) or hit the **emergency button** in the lobby (`F`) → meeting. Chat is on-chain: open in the lobby, in meetings (living players only) and after the game; nobody talks during the heist. **Ballots are sealed** in the World and published all at once at the tally.
 - **Lights on** — when the game ends, World and every View flip public: anyone can replay the whole deal and check every role.
 - Empty seats are filled by **on-chain bots** that obey the same fog of war.
+
+**On a phone** the whole app is a landscape game: an intro, a game menu, then the lobby and
+the heist with a joystick on the left and USE / CUFF / REPORT / ALARM on the right. Android
+goes fullscreen and locks landscape; where that isn't possible (iPhone, or a phone locked to
+portrait) the app rotates itself and the joystick input is rotated to match.
+
+**Moving feels instant even though the truth is sealed.** Your position lives in the World,
+so the server's answer always arrives a round trip late. The client runs the program's own
+integer movement rule at the measured crank rate (`app/src/game/predict.ts`), draws between
+ticks, and reconciles by matching the server's report against where *you* were when it was
+computed, so a lagging server never drags you backwards. Moves reuse a cached rollup
+blockhash (valid ~60 s), so each 100 ms `act` is a single request.
 
 ## Trust the enclave for secrets, not for the result
 
@@ -40,8 +52,9 @@ it decides has to be taken on faith:
    take from outside — each human's input, each ballot, the clock — into a sealed log
    account, and folds it into a SHA-256 chain the Room carries. Bots aren't logged: they're
    part of the rules.
-3. **Every result is committed.** At lights-on every heist's final Room — winner, roles, deal
-   commitment, log hash — is committed to Solana (free tables too).
+3. **Every result is committed.** Right after lights-on, `commit_result` (permissionless, once
+   per heist) commits the final Room — winner, roles, deal commitment, log hash — to Solana,
+   free tables too.
 4. **The browser replays the heist.** `tools/replay` compiles the program's *own*
    `state.rs` + `sim.rs` + `replaylog.rs` to WebAssembly (75 KB). At lights-on the client
    replays every step from the deal and checks: same World byte-for-byte, same winner,
@@ -79,7 +92,7 @@ token account on Solana (`buy_tip`, max 5 USDC, one entry per wallet per heist).
 is made inside the rollup (`pick`, signed by the session key the tip named): it lands in the
 public Room with a weight = heist time left, so calling it early pays more; re-calling
 resets the weight. Seated players (session or wallet) are refused, dead seats can't be picked,
-and calls close when the heist ends. At lights-on the commit carries a Magic Action,
+and calls close when the heist ends. After lights-on, `commit_result` carries a Magic Action,
 `record_tips`, that copies every call plus the published roles into the Market. Right
 calls get their stake back plus a share of the wrong calls' stakes, in proportion to
 stake × weight; if nobody called a Mole, everyone is refunded; no house cut
@@ -127,8 +140,28 @@ stake × weight; if nobody called a Mole, everyone is refunded; no house cut
 - **Unsteerable deal:** each player's 32-byte salt is written straight into the sealed World at `join` (and refreshed every heist); the oracle never sees the salts, players never see the VRF output in time.
 - **Verifiable afterwards:** at lights-on the client recomputes `seed = SHA-256("inside-job/deal/v1" ‖ vrf ‖ salts ‖ room_id ‖ match_no)` and replays the program's exact shuffle (splitmix64 + rejection sampling + Fisher-Yates) in the browser.
 - **Oracle down?** After ~6 s any seated player may deal from rollup state (still salted) — flagged `fallback` in the UI.
-- **Liveness:** if the crank ever stalls, any seated client may call `tick` — slot-gated on chain, so it can't speed the game up.
+- **Liveness:** if the crank ever stalls, any client may call `tick`. It's slot-gated on chain (at most one tick per 8 rollup slots, ~80 ms), so extra callers can speed the game up by at most ~25%, never skip or replay a step.
 - **Deterministic rules, tested:** `programs/inside-job/src/sim.rs` is pure functions with unit tests (deal distribution, walls, per-room vision, cuffs + witnesses, meetings, ties, ghosts, a 40-game bot balance run).
+
+## Security review
+
+Before submission the program was checked against the
+[solanabr/auditor-skill](https://github.com/solanabr/auditor-skill) checklists (account
+validation, access control, arithmetic, CPI/PDA, state machine, economic attacks) and the
+rollup-specific rules in [MagicBlock's dev skill](https://docs.magicblock.gg/pages/overview/additional-information/ai-dev-skill)
+(VRF callback identity, crank callers, delegation is not authorization, commit limits).
+Three issues were found and fixed:
+
+| Severity | Issue | Fix |
+|---|---|---|
+| High | `claim_tip` is permissionless and never bound the mint: anyone could "pay" a Tip Line entry in a junk token parked in the Market's account for it, set its claimed bit and void the real USDC payout | `claim_tip` takes the Room and requires `mint == room.mint` |
+| High (liveness) | The rollup refuses plain commits after 10 per delegation. The commit ran inside `finish`, so a refused commit reverted lights-on and stranded the room in ENDED | The commit + Magic Actions moved to a separate `commit_result`; a refused commit can no longer touch the game |
+| Medium | Refund timers started at the first ticket / tip, so after a long lobby they could expire mid-heist and a losing player could void the pot or the Tip Line | While Solana's copy of the Room shows the heist running, the window counts from its start; once it shows a result, the pot must be settled |
+
+Passing as-is: every PDA re-derived, mint and Token program owners pinned, payouts only to
+derived ATAs, `transfer_checked`, VRF callback behind `#[vrf_callback]` with duplicate
+callbacks ignored, delegation pinned to the TEE validator. Unit tests: 29 (rules, payouts,
+replay, refund rules, and the hand-encoded commit matched byte-for-byte to the SDK).
 
 ## Repo
 
@@ -137,15 +170,19 @@ programs/inside-job/
   src/lib.rs         instructions + account contexts
   src/sim.rs         the game rules (pure, unit-tested)
   src/money.rs       payout rules (pure, conservation-tested)
+  src/replaylog.rs   move log + hash chain + deal commitment
   src/magic.rs       hand-encoded commit + Magic Action intent (tested against the SDK)
-  src/state.rs       zero-copy Room / World / View layouts
+  src/state.rs       zero-copy Room / World / View / Pot / Market layouts
   src/map.txt        the map — read by the program (build.rs) AND the web client
   src/stations.txt   task stations — same
   build.rs           compiles the map + BFS flow fields for the bots
+tools/
+  replay/            the program's own rules compiled to WASM for in-browser replay
+  idlgen/            IDL builder (avoids anchor-cli switching the Solana toolchain)
 app/
   src/chain/         client: session key, TEE auth, instructions, decoders, verification
-  src/game/          canvas renderer, map rules mirror (prediction + fog)
-  src/ui/            lobby, heist, meeting, verdict, lights-on, try-to-cheat, chain log
+  src/game/          canvas renderer, map art, movement prediction (predict.ts), sounds
+  src/ui/            phone intro + menu, lobby, heist, meeting, lights-on, try-to-cheat, Tip Line
   scripts/           setup-rooms.ts (provision devnet), e2e.ts (live TEE test), e2e-stake.ts (money path)
 scripts/             WSL build / test / deploy helpers
 ```
@@ -156,20 +193,22 @@ scripts/             WSL build / test / deploy helpers
 # program (WSL / Linux): Rust 1.89, Solana CLI 3.1.x, Anchor 1.0.x
 bash scripts/test.sh          # unit tests
 bash scripts/build.sh         # SBF + IDL (copied to app/src/idl)
-bash scripts/deploy.sh        # devnet
+bash scripts/upgrade.sh       # upgrade the devnet program (extends the account if the build grew)
+                              # then wait ~1 min: the rollup keeps running the old binary briefly
 
 # client
 cd app && npm install
-npx tsx scripts/setup-rooms.ts           # free crews 11-14 + staked tables 21:0.01 22:0.01
-npm run dev
-npx tsx scripts/e2e.ts 14                # full heist against the live devnet TEE
-npx tsx scripts/e2e-stake.ts 21          # two wallets stake, play, Magic Action pays out
+npx tsx scripts/setup-rooms.ts           # free crews 31-34 + staked tables 41:1 42:1 (USDC a seat)
+npm run dev                              # add ?touch=1 to the URL to get the phone layout on desktop
+npx tsx scripts/e2e.ts 31                # full heist against the live devnet TEE
+npx tsx scripts/e2e-stake.ts 41          # needs 3 devnet USDC in the admin wallet (faucet.circle.com)
 ```
 
 ## Honest limits
 
 - **The TEE is the trust anchor for privacy, not for the result.** Secrecy during the game rests on MagicBlock's Intel TDX validator and its permission checks (the client verifies the enclave's attestation with `verifyTeeRpcIntegrity`). The outcome is re-derived in the browser from the committed deal and the move log (see above).
 - **Devnet only.** Stakes and tips are devnet USDC (Circle's faucet). Mainnet would need real-money compliance work first.
+- **Commit budget.** Each heist uses two commits (the deal, then the result), and the rollup allows 10 plain commits per delegation, so a room gets about 5 committed heists before it must be re-delegated (or pay commits from a MagicBlock fee vault, not built yet). Past that the game still plays and replays, but results stop reaching Solana, so staked pots fall back to refunds.
 - **Insiders.** A player can't tip on their own crew from their seat's keys, but nothing stops a second wallet; tips are capped at 5 USDC.
 - **Who sat where is public** on staked tables (the Pot lists wallets, the Room lists seats); roles stay sealed until lights-on.
 - Players talking over voice can always collude; that's true of every online social-deduction game.
