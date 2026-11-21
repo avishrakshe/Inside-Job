@@ -365,7 +365,7 @@ export class GameClient {
   async claimTip(wallet: InjectedWallet, id: number, matchNo: number, entry: number, entryWallet: PublicKey, mint: PublicKey) {
     const market = marketPda(id, matchNo);
     const ix = await this.program.methods.claimTip(new BN(id), matchNo, entry)
-      .accountsPartial({ market, vault: ataOf(market, mint), dest: ataOf(entryWallet, mint), mint, tokenProgram: TOKEN_PROGRAM })
+      .accountsPartial({ market, vault: ataOf(market, mint), dest: ataOf(entryWallet, mint), mint, tokenProgram: TOKEN_PROGRAM, room: roomPda(id) })
       .instruction();
     return this.sendBase(wallet, [ix], "Tip Line: claim");
   }
@@ -483,12 +483,18 @@ export class GameClient {
     }
     return out;
   }
-  /** Lights on. Staked tables also commit the Room to Solana + schedule the `settle` Magic Action. */
-  async finish(id: number, nonce: bigint = 0n) {
-    const rest = this.viewPerms(id);
-    if (nonce !== 0n) rest.push({ pubkey: potPda(id, nonce), isSigner: false, isWritable: false });
-    const ix = await this.program.methods.finish().accountsPartial(this.lightsAccounts(id)).remainingAccounts(rest).instruction();
-    return this.send([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_200_000 }), ix], nonce ? "lights on: commit result + settle Pot" : "lights on: commit result to Solana");
+  /** Lights on: unseal the World, every View and the move log (all inside the rollup). */
+  async finish(id: number) {
+    const ix = await this.program.methods.finish().accountsPartial(this.lightsAccounts(id)).remainingAccounts(this.viewPerms(id)).instruction();
+    return this.send([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_200_000 }), ix], "lights on");
+  }
+  /** After lights-on: commit the final Room to Solana (+ Magic Actions: settle the Pot, resolve the Tip Line). Once per heist. */
+  async commitResult(id: number, nonce: bigint = 0n) {
+    const rest = nonce !== 0n ? [{ pubkey: potPda(id, nonce), isSigner: false, isWritable: false }] : [];
+    const ix = await this.program.methods.commitResult()
+      .accountsPartial({ payer: this.pubkey, room: roomPda(id), magicProgram: MAGIC_PROGRAM, magicContext: MAGIC_CONTEXT })
+      .remainingAccounts(rest).instruction();
+    return this.send([ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), ix], nonce ? "commit result to Solana + settle Pot" : "commit result to Solana");
   }
   async reset(id: number) {
     const ix = await this.program.methods.reset().accountsPartial(this.lightsAccounts(id)).remainingAccounts(this.viewPerms(id)).instruction();

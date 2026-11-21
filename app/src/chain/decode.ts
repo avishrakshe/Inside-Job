@@ -9,6 +9,7 @@ export const VOTE_NONE = 255;
 export const ROLE_CREW = 0;
 export const ROLE_MOLE = 1;
 export const ROLE_UNKNOWN = 255;
+export const COMMITTED_DEAL = 1, COMMITTED_RESULT = 2;
 export const PH = { LOBBY: 0, STARTING: 1, PLAY: 2, MEETING: 3, RESULT: 4, ENDED: 5, REVEALED: 6 } as const;
 export const PHASE_NAME = ["Lobby", "Dealing", "Heist", "Meeting", "Verdict", "Ended", "Lights on"];
 export const READY_ALL = 1 | (0xff << 8);
@@ -35,6 +36,7 @@ export interface RoomState {
   /** running SHA-256 of the move log; committed to Solana with the result */
   logHash: Uint8Array;
   logLen: number;
+  /** bit flags: COMMITTED_DEAL, COMMITTED_RESULT */
   dealCommitted: number;
   /** Tip Line: picks so far (index = Market entry) */
   tipN: number;

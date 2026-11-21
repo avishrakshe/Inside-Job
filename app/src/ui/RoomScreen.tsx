@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GameClient } from "../chain/client";
-import { MAXP, PH, PHASE_NAME, ROLE_CREW, ROLE_MOLE, RoomState, ViewState, WorldState, isEmptyKey, occupied } from "../chain/decode";
+import { COMMITTED_DEAL, COMMITTED_RESULT, MAXP, PH, PHASE_NAME, ROLE_CREW, ROLE_MOLE, RoomState, ViewState, WorldState, isEmptyKey, occupied } from "../chain/decode";
 import { draw, drawMinimap, SEAT_COLORS } from "../game/render";
 import { dirFromKeys, HEIST_TICKS, ROOM_NAMES, STATIONS, USE_R, dist2, tileAt } from "../game/map";
 import { Predictor } from "../game/predict";
@@ -82,8 +82,7 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
   const phase = room?.phase ?? -1;
   useEffect(() => {
     if (phase === PH.ENDED && seated) {
-      const nonce = roomRef.current?.potNonce ?? 0n;
-      const t = setTimeout(() => client.finish(roomId, nonce).catch(() => {}), 1500 + seat * 400);
+      const t = setTimeout(() => client.finish(roomId).catch(() => {}), 1500 + seat * 400);
       return () => clearTimeout(t);
     }
     if (phase === PH.REVEALED) {
@@ -98,12 +97,21 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
   }, [phase, seated, seat, client, roomId]);
 
   // ---- once dealt, push the deal commitment to Solana (any seated client; first one wins)
-  const dealCommitted = room?.dealCommitted ?? 1;
+  const committed = room?.dealCommitted ?? (COMMITTED_DEAL | COMMITTED_RESULT);
   useEffect(() => {
-    if (!seated || phase !== PH.PLAY || dealCommitted) return;
+    if (!seated || phase !== PH.PLAY || committed & COMMITTED_DEAL) return;
     const t = setTimeout(() => client.commitDeal(roomId).catch(() => {}), 800 + seat * 900);
     return () => clearTimeout(t);
-  }, [seated, phase, dealCommitted, seat, client, roomId]);
+  }, [seated, phase, committed, seat, client, roomId]);
+
+  // ---- after lights-on, push the final Room (and the Pot / Tip Line payouts) to Solana.
+  // Separate from the reveal, so a commit the validator refuses can never strand the room.
+  useEffect(() => {
+    if (!seated || phase !== PH.REVEALED || committed & COMMITTED_RESULT) return;
+    const nonce = roomRef.current?.potNonce ?? 0n;
+    const t = setTimeout(() => client.commitResult(roomId, nonce).catch(() => {}), 600 + seat * 900);
+    return () => clearTimeout(t);
+  }, [seated, phase, committed, seat, client, roomId]);
 
   // ---- fresh sealed salt each time we're back in the lobby
   const saltFor = useRef(-1);

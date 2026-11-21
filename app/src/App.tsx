@@ -3,7 +3,7 @@ import { verifyTeeRpcIntegrity } from "@magicblock-labs/ephemeral-rollups-sdk";
 import { GameClient, loadSessionKey, randomNonce, TxEvent } from "./chain/client";
 import { FAUCET_URL, ROOM_IDS, STAKED_ROOM_IDS, TEE_RPC, USDC_FAUCET_URL } from "./chain/config";
 import { PublicKey } from "@solana/web3.js";
-import { RoomState, PH, PHASE_NAME, occupied, MAXP, isEmptyKey } from "./chain/decode";
+import { RoomState, PH, PHASE_NAME, occupied, MAXP, isEmptyKey, COMMITTED_RESULT } from "./chain/decode";
 import Landing, { LandingStats } from "./ui/Landing";
 import ChainLog from "./ui/ChainLog";
 import Avatar from "./ui/Avatar";
@@ -380,7 +380,9 @@ async function heal(client: GameClient, rooms: (RoomState | null)[]) {
       healed[k] = now;
       fn().catch(() => {});
     };
-    if (r.phase === PH.ENDED && age > 20) once("finish", () => client.finish(r.roomId, r.potNonce));
+    if (r.phase === PH.ENDED && age > 20) once("finish", () => client.finish(r.roomId));
+    // the players left before committing the result: commit it so the Pot / Tip Line pay out
+    if (r.phase === PH.REVEALED && age > 10 && !(r.dealCommitted & COMMITTED_RESULT)) once("commit", () => client.commitResult(r.roomId, r.potNonce));
     if (r.phase === PH.REVEALED && age > 120) once("reset", () => client.reset(r.roomId));
     if (r.phase === PH.LOBBY || r.phase === PH.REVEALED) {
       const unix = now / 1000;

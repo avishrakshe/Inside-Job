@@ -66,4 +66,8 @@ pub enum GameError {
     AlreadyClaimed,
     #[msg("the deal is already committed")]
     AlreadyCommitted,
+    #[msg("this heist has a result on Solana: settle it instead of refunding")]
+    SettleInstead,
+    #[msg("this heist is still running: a refund opens 20 minutes after it started")]
+    HeistRunning,
 }

@@ -172,8 +172,19 @@ pub mod inside_job {
         let rest = ctx.remaining_accounts;
         let (pot_ai, mut pot) = find_pot(rest, room_id, nonce)?;
         require!(pot.status == POT_OPEN, GameError::PotClosed);
-        require!(Clock::get()?.unix_timestamp >= pot.created_at + REFUND_AFTER_SECS, GameError::TooEarly);
+        let now = Clock::get()?.unix_timestamp;
+        require!(now >= pot.created_at + REFUND_AFTER_SECS, GameError::TooEarly);
         let room = read_room(find_key(rest, &room_pda(room_id))?, room_id)?;
+        // The timer above starts at the first ticket, so after a long lobby it could run out
+        // mid-heist, and a player who saw they were losing could refund the pot. If Solana's
+        // copy of the Room shows this pot's heist, a finished result must be settled and a
+        // running heist gets the full window from its own start. (audit: SM-041, ECON)
+        if room.pot_nonce == nonce {
+            require!(!has_result(&room), GameError::SettleInstead);
+            if let Some(start) = heist_started_at(&room) {
+                require!(now >= start + REFUND_AFTER_SECS, GameError::HeistRunning);
+            }
+        }
         let pay = money::refunds(&pot);
         pay_out(pot_ai, rest, &pot, &room.mint, &pay)?;
         pot.status = POT_REFUNDED;
@@ -246,7 +257,15 @@ pub mod inside_job {
             m.paid = money::tip_payouts(n, &m.amounts, &m.seats, &m.weights, &m.roles);
             m.status = MARKET_RESOLVED;
         } else {
-            require!(Clock::get()?.unix_timestamp >= m.created_at + REFUND_AFTER_SECS, GameError::NotSettleable);
+            let now = Clock::get()?.unix_timestamp;
+            require!(now >= m.created_at + REFUND_AFTER_SECS, GameError::NotSettleable);
+            // same rule as `refund`: a running heist can't be turned into refunds early
+            // (a tipper who saw their pick losing could otherwise void the whole Tip Line)
+            if room.match_no == match_no {
+                if let Some(start) = heist_started_at(&room) {
+                    require!(now >= start + REFUND_AFTER_SECS, GameError::HeistRunning);
+                }
+            }
             m.paid = m.amounts;
             m.status = MARKET_REFUNDED;
         }
@@ -257,6 +276,11 @@ pub mod inside_job {
 
     /// Pay one Tip Line entry what it's owed, into its wallet's token account. Permissionless.
     pub fn claim_tip(ctx: Context<ClaimTip>, room_id: u64, match_no: u32, entry: u8) -> Result<()> {
+        // The mint must be the room's. Otherwise anyone could pass a junk mint (with junk
+        // tokens parked in the Market's ATA for it), "pay" an entry in junk and set its
+        // claimed bit, so the real USDC payout could never be claimed. (audit: AV-045)
+        let room = read_room(&ctx.accounts.room.to_account_info(), room_id)?;
+        require_keys_eq!(ctx.accounts.mint.key(), room.mint, GameError::BadMint);
         let e = entry as usize;
         let (amount, owner, mint_key, bump) = {
             let m = &ctx.accounts.market;
@@ -674,8 +698,8 @@ pub mod inside_job {
         {
             let mut room = ctx.accounts.room.load_mut()?;
             require!(matches!(room.phase, PH_PLAY | PH_MEETING | PH_RESULT), GameError::WrongPhase);
-            require!(room.deal_committed == 0, GameError::AlreadyCommitted);
-            room.deal_committed = 1;
+            require!(room.deal_committed & COMMITTED_DEAL == 0, GameError::AlreadyCommitted);
+            room.deal_committed |= COMMITTED_DEAL;
         }
         let a = &ctx.accounts;
         let ix = magic::commit_ix(a.payer.key(), a.room.key(), &[]);
@@ -828,16 +852,16 @@ pub mod inside_job {
     }
 
     /// Lights on: World, every View and the move log flip to public, so anyone can check
-    /// the deal (VRF + salts) and replay the whole heist. remaining: [view_i, view_perm_i] x 8
-    /// (+ the Pot on staked tables). Every heist's final Room — winner, roles, deal
-    /// commitment, log hash — is committed to Solana, with Magic Actions that resolve the
-    /// Tip Line and pay the Pot there, in the same flow as the reveal.
+    /// the deal (VRF + salts) and replay the whole heist. remaining: [view_i, view_perm_i] x 8.
+    /// The Solana side (commit + settle the Pot + resolve the Tip Line) is `commit_result`,
+    /// a separate call: the ER validator caps plain commits per delegation, and a refused
+    /// commit inside this instruction used to revert the reveal and strand the room in ENDED.
     pub fn finish<'info>(ctx: Context<'info, Lights<'info>>) -> Result<()> {
-        let (room_id, bump, pot_nonce, match_no, tips, mint) = {
+        let (room_id, bump) = {
             let mut room = ctx.accounts.room.load_mut()?;
             require!(room.phase == PH_ENDED, GameError::WrongPhase);
             room.phase = PH_REVEALED;
-            (room.room_id, room.bump, room.pot_nonce, room.match_no, room.tip_n > 0, room.mint)
+            (room.room_id, room.bump)
         };
         flip_all(&ctx, room_id, bump, false)?;
         {
@@ -859,6 +883,21 @@ pub mod inside_job {
             }
             .invoke_signed(&[&[ROOM_SEED, &rid, &[bump]], &[LOG_SEED, &rid, &[log_bump]]])?;
         }
+        Ok(())
+    }
+
+    /// After lights-on: commit the final Room (winner, roles, deal commitment, log hash) to
+    /// Solana, with Magic Actions that resolve the Tip Line and pay the Pot there. Anyone
+    /// may call it, once per heist, while the room is still revealed.
+    /// remaining accounts: the Pot (staked tables only).
+    pub fn commit_result<'info>(ctx: Context<'info, CommitRoom<'info>>) -> Result<()> {
+        let (room_id, pot_nonce, match_no, tips, mint) = {
+            let mut room = ctx.accounts.room.load_mut()?;
+            require!(room.phase == PH_REVEALED, GameError::WrongPhase);
+            require!(room.deal_committed & COMMITTED_RESULT == 0, GameError::AlreadyCommitted);
+            room.deal_committed |= COMMITTED_RESULT;
+            (room.room_id, room.pot_nonce, room.match_no, room.tip_n > 0, room.mint)
+        };
         let a = &ctx.accounts;
         let mut actions: Vec<magic::BaseAction> = Vec::new();
         if tips {
@@ -870,7 +909,7 @@ pub mod inside_job {
             });
         }
         if pot_nonce != 0 {
-            let pot_ai = ctx.remaining_accounts.get(MAXP * 2).ok_or(GameError::NoTicket)?;
+            let pot_ai = ctx.remaining_accounts.first().ok_or(GameError::NoTicket)?;
             let pot = read_pot(pot_ai, room_id, pot_nonce)?;
             let mut metas: Vec<(Pubkey, bool)> = vec![
                 (pot_ai.key(), true),
@@ -971,6 +1010,22 @@ pub fn mix_seed(room: &Room, w: &World, randomness: &[u8; 32]) -> [u8; 32] {
         salts[i * 32..(i + 1) * 32].copy_from_slice(&w.salts[i]);
     }
     hashv(&[&b"inside-job/deal/v1"[..], &randomness[..], &salts[..], &room.room_id.to_le_bytes()[..], &room.match_no.to_le_bytes()[..]]).to_bytes()
+}
+
+/// A committed Room that holds a final result (what `settle` / `record_tips` pay from).
+fn has_result(room: &Room) -> bool {
+    (room.phase == PH_ENDED || room.phase == PH_REVEALED) && room.winner <= TEAM_MOLE
+}
+
+/// When a committed Room shows a heist in progress: roughly when it started. `start_match`
+/// stamps the starter's `last_seen` and nothing in a heist moves it earlier, so the latest
+/// stamp is never before the start: refunds measured from it can only be late, never early.
+fn heist_started_at(room: &Room) -> Option<i64> {
+    if matches!(room.phase, PH_STARTING | PH_PLAY | PH_MEETING | PH_RESULT) {
+        Some(room.last_seen.iter().copied().max().unwrap_or(0) as i64)
+    } else {
+        None
+    }
 }
 
 pub fn pot_pda(room_id: u64, nonce: u64) -> Pubkey {
@@ -1269,11 +1324,14 @@ pub struct ClaimTip<'info> {
     /// CHECK: the entry wallet's token account (checked as its ATA)
     #[account(mut)]
     pub dest: UncheckedAccount<'info>,
-    /// CHECK: the mint (decimals); a wrong mint can't move this Market's tokens
+    /// CHECK: must be the room's mint (checked in the handler)
     pub mint: UncheckedAccount<'info>,
     /// CHECK: SPL token program
     #[account(address = TOKEN_PROGRAM_ID)]
     pub token_program: UncheckedAccount<'info>,
+    /// CHECK: the room PDA (delegated: owned by the delegation program); parsed in the handler
+    #[account(seeds = [ROOM_SEED, &room_id.to_le_bytes()], bump)]
+    pub room: UncheckedAccount<'info>,
 }
 
 /// `settle` / `refund` find every account by address in the remaining accounts, so they
@@ -1480,7 +1538,8 @@ pub struct Lights<'info> {
     /// CHECK: magic program
     #[account(address = MAGIC_PROGRAM_ID)]
     pub magic_program: UncheckedAccount<'info>,
-    /// CHECK: magic context (every heist's Room is committed at lights-on)
+    /// CHECK: magic context (unused since the commit moved to `commit_result`; kept so the
+    /// account list, and every client, stays the same)
     #[account(mut, address = MAGIC_CONTEXT_ID)]
     pub magic_context: UncheckedAccount<'info>,
     /// CHECK: the move log PDA, checked in `finish` (unsealed at lights-on)
@@ -1489,4 +1548,46 @@ pub struct Lights<'info> {
     /// CHECK: the move log's permission PDA, checked in `finish`
     #[account(mut)]
     pub log_permission: UncheckedAccount<'info>,
+}
+
+#[cfg(test)]
+mod refund_rules {
+    use super::*;
+
+    fn room(phase: u8, winner: u8, last_seen: [u32; MAXP]) -> Box<Room> {
+        let mut r: Box<Room> = bytemuck::zeroed_box();
+        r.phase = phase;
+        r.winner = winner;
+        r.last_seen = last_seen;
+        r
+    }
+
+    #[test]
+    fn a_finished_heist_must_be_settled_not_refunded() {
+        assert!(has_result(&room(PH_ENDED, TEAM_MOLE, [0; MAXP])));
+        assert!(has_result(&room(PH_REVEALED, 0, [0; MAXP])));
+        // ended without a winner (shouldn't happen, but never block the refund on it)
+        assert!(!has_result(&room(PH_ENDED, NO_SEAT, [0; MAXP])));
+        assert!(!has_result(&room(PH_PLAY, 0, [0; MAXP])));
+    }
+
+    #[test]
+    fn a_running_heist_is_timed_from_its_latest_start_stamp() {
+        let seen = [100, 950, 0, 400, 0, 0, 0, 0];
+        for ph in [PH_STARTING, PH_PLAY, PH_MEETING, PH_RESULT] {
+            assert_eq!(heist_started_at(&room(ph, NO_SEAT, seen)), Some(950));
+        }
+        for ph in [PH_LOBBY, PH_ENDED, PH_REVEALED] {
+            assert_eq!(heist_started_at(&room(ph, NO_SEAT, seen)), None);
+        }
+    }
+
+    #[test]
+    fn commit_flags_are_independent() {
+        let mut f = 0u8;
+        f |= COMMITTED_DEAL;
+        assert_eq!(f & COMMITTED_RESULT, 0, "committing the deal must not block the result");
+        f |= COMMITTED_RESULT;
+        assert_eq!(f & COMMITTED_DEAL, COMMITTED_DEAL);
+    }
 }

@@ -369,6 +369,26 @@
         {
           "name": "token_program",
           "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "room",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "room_id"
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -402,6 +422,63 @@
         4,
         211,
         152
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "commit_result",
+      "docs": [
+        "After lights-on: commit the final Room (winner, roles, deal commitment, log hash) to",
+        "Solana, with Magic Actions that resolve the Tip Line and pay the Pot there. Anyone",
+        "may call it, once per heist, while the room is still revealed.",
+        "remaining accounts: the Pot (staked tables only)."
+      ],
+      "discriminator": [
+        45,
+        73,
+        224,
+        222,
+        48,
+        67,
+        191,
+        185
       ],
       "accounts": [
         {
@@ -794,10 +871,10 @@
       "name": "finish",
       "docs": [
         "Lights on: World, every View and the move log flip to public, so anyone can check",
-        "the deal (VRF + salts) and replay the whole heist. remaining: [view_i, view_perm_i] x 8",
-        "(+ the Pot on staked tables). Every heist's final Room — winner, roles, deal",
-        "commitment, log hash — is committed to Solana, with Magic Actions that resolve the",
-        "Tip Line and pay the Pot there, in the same flow as the reveal."
+        "the deal (VRF + salts) and replay the whole heist. remaining: [view_i, view_perm_i] x 8.",
+        "The Solana side (commit + settle the Pot + resolve the Tip Line) is `commit_result`,",
+        "a separate call: the ER validator caps plain commits per delegation, and a refused",
+        "commit inside this instruction used to revert the reveal and strand the room in ENDED."
       ],
       "discriminator": [
         67,
@@ -859,6 +936,9 @@
         },
         {
           "name": "magic_context",
+          "docs": [
+            "account list, and every client, stays the same)"
+          ],
           "writable": true,
           "address": "MagicContext1111111111111111111111111111111"
         },
@@ -1317,6 +1397,9 @@
         },
         {
           "name": "magic_context",
+          "docs": [
+            "account list, and every client, stays the same)"
+          ],
           "writable": true,
           "address": "MagicContext1111111111111111111111111111111"
         },
@@ -1996,6 +2079,16 @@
       "code": 6031,
       "name": "AlreadyCommitted",
       "msg": "the deal is already committed"
+    },
+    {
+      "code": 6032,
+      "name": "SettleInstead",
+      "msg": "this heist has a result on Solana: settle it instead of refunding"
+    },
+    {
+      "code": 6033,
+      "name": "HeistRunning",
+      "msg": "this heist is still running: a refund opens 20 minutes after it started"
     }
   ],
   "types": [
@@ -2507,7 +2600,8 @@
           {
             "name": "deal_committed",
             "docs": [
-              "1 once the Room carrying `deal_commit` has been committed to Solana"
+              "bit flags: COMMITTED_DEAL once the Room carrying `deal_commit` has been committed to",
+              "Solana, COMMITTED_RESULT once the final Room has (cleared by `start_match`)"
             ],
             "type": "u8"
           },

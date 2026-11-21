@@ -117,7 +117,8 @@ pub struct Room {
     /// running SHA-256 over the move log: committed to Solana with the result
     pub log_hash: [u8; 32],
     pub log_len: u32,
-    /// 1 once the Room carrying `deal_commit` has been committed to Solana
+    /// bit flags: COMMITTED_DEAL once the Room carrying `deal_commit` has been committed to
+    /// Solana, COMMITTED_RESULT once the final Room has (cleared by `start_match`)
     pub deal_committed: u8,
     /// Tip Line entries that have picked this heist (index into the base-layer Market)
     pub tip_n: u8,
@@ -128,6 +129,8 @@ pub struct Room {
     pub tip_weight: [u16; MAX_TIPS],
 }
 pub const ROOM_SIZE: usize = 1784;
+pub const COMMITTED_DEAL: u8 = 1;
+pub const COMMITTED_RESULT: u8 = 2;
 const _: () = assert!(core::mem::size_of::<Room>() == ROOM_SIZE);
 
 impl Room {

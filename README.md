@@ -69,7 +69,7 @@ sequence; the inputs themselves were private while the game ran).
 | **Crank** | `start_match` schedules `tick` every 100 ms: movement, vision, cooldowns, meetings, bots. |
 | **Session keys** | The browser makes a key with 0 SOL that signs ~10 moves/s, no wallet popups, and can't move funds. |
 | **Delegation** | Room PDAs live on Solana and are delegated to the TEE validator only. |
-| **Magic Actions** | Staked tables: `finish` commits the Room to Solana and schedules `settle` there in the same intent, so lights-on *is* the payout. |
+| **Magic Actions** | Staked tables: right after lights-on, `commit_result` commits the Room to Solana and schedules `settle` there in the same intent, so lights-on *is* the payout. |
 | **Commits** | The committed Room is the only thing Solana learns about a heist: who won and who held which role, after lights-on. |
 
 ## Tip Line: a prediction market with no oracle
@@ -84,14 +84,14 @@ and calls close when the heist ends. At lights-on the commit carries a Magic Act
 calls get their stake back plus a share of the wrong calls' stakes, in proportion to
 stake × weight; if nobody called a Mole, everyone is refunded; no house cut
 (`money::tip_payouts`, conservation-tested). Payouts are claimed with `claim_tip`
-(permissionless). If the heist never resolves, `record_tips` refunds everyone after 20 min.
+(permissionless, and only in the room's own mint). If the heist never resolves, `record_tips` refunds everyone after 20 min (counted from the heist's start while it's running).
 
 ## Staked tables: a pot that pays itself out
 
 1. **Ticket (Solana).** `buy_ticket` moves the table's stake (devnet USDC) from your wallet's token account into that heist's `Pot` (its token account) and names the in-browser **session key** that may use the ticket. The Pot is plain base-layer state; the money never leaves Solana.
 2. **Seat (TEE rollup).** `join` reads the Pot from Solana inside the rollup and seats only the session key the ticket named. A different key with the same wallet is refused.
-3. **Lights on → payout.** `finish` flips the World public, commits the Room to Solana and attaches a post-commit **Magic Action** that runs `settle` on Solana. `settle` reads the *committed* Room (winner + published roles) and pays the winning humans from the Pot. **No oracle, no admin:** the result was sealed program state all along.
-4. **Failure paths.** `settle` is permissionless and idempotent, so if the action never lands anyone can run the same payout from the committed Room. If a pot is still open after 20 minutes (crank died, nobody started), **anyone can refund every ticket**. Refund, never re-roll.
+3. **Lights on → payout.** `finish` flips the World public. Then `commit_result` (permissionless, once per heist) commits the Room to Solana and attaches a post-commit **Magic Action** that runs `settle` there. `settle` reads the *committed* Room (winner + published roles) and pays the winning humans from the Pot. **No oracle, no admin:** the result was sealed program state all along. The commit is a separate step on purpose: the rollup caps plain commits per delegation, and a refused commit must never strand a room mid-reveal.
+4. **Failure paths.** `settle` is permissionless and idempotent, so if the action never lands anyone can run the same payout from the committed Room. If a pot is still open after 20 minutes (crank died, nobody started), **anyone can refund every ticket**. Refund, never re-roll. A refund can't cut a heist short: if Solana's copy of the Room shows the heist running, the 20 minutes count from its start, and once it shows a result the pot must be settled instead.
 
 **The rules** (`programs/inside-job/src/money.rs`, unit-tested): seated humans on the winning team split everything the seated humans staked; tickets that never sat down are refunded; if no human won (bots did), every human is refunded; no house cut. A property test sweeps every ticket count, stake, seating and winner and asserts **payouts == stake × tickets** to the lamport.
 

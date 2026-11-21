@@ -186,6 +186,7 @@ async function main() {
 
   if (end.phase === PH.ENDED) await me.finish(roomId);
   const revealed = await waitFor(async () => { const r = await me.fetchRoom(roomId); return r && r.phase === PH.REVEALED ? r : null; }, 20_000, "lights on");
+  await me.commitResult(roomId).catch((e) => log("  commit_result:", String(e?.message ?? e).slice(0, 80)));
   const wr = await stranger.tryRead(worldPda(roomId));
   check("after lights-on the World is public", wr.ok, wr.note);
   const world = (await stranger.fetchWorld(roomId))!;

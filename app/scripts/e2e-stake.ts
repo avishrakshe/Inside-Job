@@ -59,7 +59,7 @@ async function main() {
   const wallets = [asWallet(admin), asWallet(w2)];
   log("wallets", wallets.map((w) => w.publicKey!.toBase58()), "spectator", w3.publicKey.toBase58());
 
-  if (room.phase === PH.ENDED) { await players[0].finish(roomId, room.potNonce).catch(() => {}); room = (await players[0].fetchRoom(roomId))!; }
+  if (room.phase === PH.ENDED) { await players[0].finish(roomId).catch(() => {}); room = (await players[0].fetchRoom(roomId))!; }
   if (room.phase === PH.REVEALED) { await players[0].reset(roomId); room = (await players[0].fetchRoom(roomId))!; }
   if (room.phase !== PH.LOBBY) throw new Error(`table ${roomId} busy (${PHASE_NAME[room.phase]})`);
 
@@ -109,7 +109,12 @@ async function main() {
   check("the staked heist ends with a winner", end.winner <= 1, end.winner === 1 ? "Mole wins" : "Crew wins");
 
   const t0 = Date.now();
-  if (end.phase === PH.ENDED) await players[0].finish(roomId, nonce);
+  if (end.phase === PH.ENDED) await players[0].finish(roomId);
+  await waitFor(async () => { const r = await players[0].fetchRoom(roomId); return r && r.phase === PH.REVEALED ? r : null; }, 20_000, "lights on");
+  await players[0].commitResult(roomId, nonce);
+  // a second commit of the same heist is refused (once per heist)
+  const twice = await players[1].commitResult(roomId, nonce).then(() => false).catch(() => true);
+  check("the result commits once per heist", twice);
   const pot = await waitFor(async () => { const p = await players[0].fetchPot(roomId, nonce); return p && p.status !== POT_OPEN ? p : null; }, 120_000, "Magic Action settle").catch(() => null);
   check("Magic Action settled the USDC Pot on Solana", pot?.status === POT_SETTLED, `${((Date.now() - t0) / 1000).toFixed(1)} s after finish`);
   if (!pot) await players[0].settle(wallets[0], roomId, nonce, mint).catch((e) => log("fallback settle:", e.message));
