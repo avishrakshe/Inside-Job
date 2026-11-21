@@ -1,0 +1,19 @@
+[features]
+resolution = true
+skip-lint = false
+
+[programs.devnet]
+inside_job = "9B5TZmBnskcBrZ1QMCuojqrDEn1dEsb3oVNtgvZ73R2U"
+
+[programs.localnet]
+inside_job = "9B5TZmBnskcBrZ1QMCuojqrDEn1dEsb3oVNtgvZ73R2U"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "echo 'run npm test in /client'"

@@ -1,0 +1,16 @@
+target/
+node_modules/
+dist/
+.anchor/
+.env
+.env.*
+!.env.example
+*.keypair.json
+**/deploy/*-keypair.json
+test-ledger/
+.DS_Store
+app/node_modules/
+app/dist/
+*.tsbuildinfo
+.vercel
+.env*

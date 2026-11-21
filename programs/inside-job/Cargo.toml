@@ -1,0 +1,33 @@
+[package]
+name = "inside-job"
+version = "0.1.0"
+description = "INSIDE JOB - real-time sealed social deduction on MagicBlock Private Ephemeral Rollups"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "inside_job"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+custom-heap = []
+custom-panic = []
+anchor-debug = []
+
+[dependencies]
+anchor-lang = { version = "1.0.2", features = ["init-if-needed"] }
+ephemeral-rollups-sdk = { version = "=0.17.3", features = ["anchor", "access-control", "vrf", "crank"] }
+bytemuck = { version = "1.16", features = ["derive", "min_const_generics"] }
+solana-sha256-hasher = "3.1"
+
+[dev-dependencies]
+# only to prove magic.rs encodes ScheduleIntentBundle exactly like the SDK does
+magicblock-magic-program-api = { version = "=0.10.1", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

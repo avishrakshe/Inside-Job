@@ -1,0 +1,10 @@
+# Upload only what the web build needs: the app and the map/station files it shares with the program.
+/*
+!/vercel.json
+!/app
+!/programs
+/app/node_modules
+/app/dist
+/app/scripts
+/programs/**/*.rs
+/programs/**/Cargo.toml

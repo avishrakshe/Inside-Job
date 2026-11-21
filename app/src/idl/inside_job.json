@@ -1,0 +1,1907 @@
+{
+  "address": "9B5TZmBnskcBrZ1QMCuojqrDEn1dEsb3oVNtgvZ73R2U",
+  "metadata": {
+    "name": "inside_job",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "INSIDE JOB - real-time sealed social deduction on MagicBlock Private Ephemeral Rollups"
+  },
+  "instructions": [
+    {
+      "name": "act",
+      "docs": [
+        "The one gameplay instruction. Move / hold USE / cuff / report / emergency all look",
+        "identical on the wire, so not even transaction metadata says what you did."
+      ],
+      "discriminator": [
+        114,
+        158,
+        229,
+        112,
+        242,
+        50,
+        227,
+        5
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true
+        },
+        {
+          "name": "world",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "input",
+          "type": "u8"
+        },
+        {
+          "name": "seq",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "buy_ticket",
+      "docs": [
+        "Staked tables: pay `stake` into this heist's Pot on Solana and name the session key",
+        "that may use the ticket to take a seat in the rollup. The Pot is plain base-layer",
+        "state (never delegated), so the money never leaves Solana."
+      ],
+      "discriminator": [
+        11,
+        24,
+        17,
+        193,
+        168,
+        116,
+        164,
+        169
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "room_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pot",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "room_id"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "room_id",
+          "type": "u64"
+        },
+        {
+          "name": "nonce",
+          "type": "u64"
+        },
+        {
+          "name": "session",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "chat",
+      "docs": [
+        "Public chat: in the lobby, during meetings (living players only) and after the game.",
+        "Nobody talks during the heist."
+      ],
+      "discriminator": [
+        189,
+        34,
+        82,
+        12,
+        30,
+        178,
+        146,
+        97
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true
+        },
+        {
+          "name": "world",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "len",
+          "type": "u8"
+        },
+        {
+          "name": "text",
+          "type": {
+            "array": [
+              "u8",
+              48
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "create_room",
+      "docs": [
+        "Create a room and pre-fund it: its lamports follow it into the rollup and pay",
+        "for the sealed accounts and their permissions there."
+      ],
+      "discriminator": [
+        130,
+        166,
+        32,
+        2,
+        247,
+        120,
+        178,
+        53
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "room_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "room_id",
+          "type": "u64"
+        },
+        {
+          "name": "max_players",
+          "type": "u8"
+        },
+        {
+          "name": "prefund",
+          "type": "u64"
+        },
+        {
+          "name": "stake",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "deal",
+      "docs": [
+        "VRF callback. Roles = H(vrf ‖ every seat's sealed salt ‖ room ‖ match): the oracle",
+        "can't know the Mole (it never sees the salts) and no player can steer it."
+      ],
+      "discriminator": [
+        128,
+        0,
+        138,
+        208,
+        72,
+        249,
+        203,
+        239
+      ],
+      "accounts": [
+        {
+          "name": "vrf_program_identity",
+          "docs": [
+            "Scoped VRF identity PDA, bound to this program. Its presence as a signer proves",
+            "the callback was issued by the VRF program for this program."
+          ],
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true
+        },
+        {
+          "name": "world",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "randomness",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "delegate_room",
+      "docs": [
+        "Hand the room to the TEE validator."
+      ],
+      "discriminator": [
+        39,
+        6,
+        122,
+        70,
+        65,
+        76,
+        166,
+        26
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "buffer_room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                121,
+                114,
+                88,
+                29,
+                41,
+                167,
+                92,
+                73,
+                180,
+                127,
+                138,
+                19,
+                122,
+                3,
+                24,
+                206,
+                53,
+                221,
+                26,
+                105,
+                61,
+                77,
+                64,
+                17,
+                93,
+                110,
+                82,
+                88,
+                200,
+                27,
+                108,
+                37
+              ]
+            }
+          }
+        },
+        {
+          "name": "delegation_record_room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "delegation_metadata_room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110,
+                  45,
+                  109,
+                  101,
+                  116,
+                  97,
+                  100,
+                  97,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "room_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "optional": true
+        },
+        {
+          "name": "owner_program",
+          "address": "9B5TZmBnskcBrZ1QMCuojqrDEn1dEsb3oVNtgvZ73R2U"
+        },
+        {
+          "name": "delegation_program",
+          "address": "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "room_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "fallback_deal",
+      "docs": [
+        "If the oracle is silent for ~6 s, any seated player can deal from rollup state.",
+        "Still mixed with the sealed salts; flagged in the UI as not VRF-grade."
+      ],
+      "discriminator": [
+        224,
+        145,
+        196,
+        237,
+        188,
+        11,
+        10,
+        152
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true
+        },
+        {
+          "name": "world",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "finish",
+      "docs": [
+        "Lights on: World and every View flip to public, so anyone can replay the deal",
+        "(VRF + salts) and check every role. remaining: [view_i, view_perm_i] x 8 (+ the Pot).",
+        "Staked tables: the Room is committed to Solana with a post-commit Magic Action that",
+        "runs `settle` there, so the payout happens in the same flow as the reveal."
+      ],
+      "discriminator": [
+        67,
+        74,
+        170,
+        132,
+        125,
+        233,
+        182,
+        37
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "world",
+          "writable": true
+        },
+        {
+          "name": "world_permission",
+          "writable": true
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "join",
+      "docs": [
+        "Take a seat. `signer` is the in-browser session key; `wallet` is who you play for.",
+        "Your sealed salt goes straight into the World, where nobody can read it.",
+        "Staked tables: `pot_nonce` names the base-layer Pot, passed as remaining account 0.",
+        "The rollup reads the ticket from Solana and only seats the session key it names."
+      ],
+      "discriminator": [
+        206,
+        55,
+        2,
+        106,
+        113,
+        220,
+        17,
+        163
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "world",
+          "writable": true
+        },
+        {
+          "name": "view",
+          "writable": true
+        },
+        {
+          "name": "view_permission",
+          "writable": true
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "seat",
+          "type": "u8"
+        },
+        {
+          "name": "name",
+          "type": {
+            "array": [
+              "u8",
+              12
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "type": "pubkey"
+        },
+        {
+          "name": "salt",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "pot_nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "leave",
+      "docs": [
+        "Leave a seat (lobby or after the game). The seat's View is sealed again."
+      ],
+      "discriminator": [
+        59,
+        234,
+        148,
+        108,
+        107,
+        149,
+        173,
+        112
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "world",
+          "writable": true
+        },
+        {
+          "name": "view",
+          "writable": true
+        },
+        {
+          "name": "view_permission",
+          "writable": true
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "seat",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "process_undelegation",
+      "discriminator": [
+        196,
+        28,
+        41,
+        206,
+        48,
+        37,
+        51,
+        167
+      ],
+      "accounts": [
+        {
+          "name": "base_account",
+          "writable": true
+        },
+        {
+          "name": "buffer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  110,
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  101,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "base_account"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                181,
+                183,
+                0,
+                225,
+                242,
+                87,
+                58,
+                192,
+                204,
+                6,
+                34,
+                1,
+                52,
+                74,
+                207,
+                151,
+                184,
+                53,
+                6,
+                235,
+                140,
+                229,
+                25,
+                152,
+                204,
+                98,
+                126,
+                24,
+                147,
+                128,
+                167,
+                62
+              ]
+            }
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "account_seeds",
+          "type": {
+            "vec": "bytes"
+          }
+        }
+      ]
+    },
+    {
+      "name": "refund",
+      "docs": [
+        "Never settled (crank died, nobody started, commit lost)? After 20 minutes anyone can",
+        "return every ticket. Refund, never re-roll."
+      ],
+      "discriminator": [
+        2,
+        96,
+        183,
+        251,
+        63,
+        208,
+        46,
+        46
+      ],
+      "accounts": [],
+      "args": [
+        {
+          "name": "room_id",
+          "type": "u64"
+        },
+        {
+          "name": "nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "reset",
+      "docs": [
+        "Back to the lobby: re-seal the World and give each View back to its seat only."
+      ],
+      "discriminator": [
+        23,
+        81,
+        251,
+        84,
+        138,
+        183,
+        240,
+        214
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "world",
+          "writable": true
+        },
+        {
+          "name": "world_permission",
+          "writable": true
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_salt",
+      "docs": [
+        "Lobby heartbeat + a fresh sealed salt for the next deal (salts are revealed at lights-on)."
+      ],
+      "discriminator": [
+        136,
+        75,
+        243,
+        128,
+        117,
+        137,
+        147,
+        209
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true
+        },
+        {
+          "name": "world",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "salt",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "settle",
+      "docs": [
+        "Pay out a finished staked heist. Runs on Solana as the Magic Action that the TEE",
+        "schedules at lights-on, right after it commits the Room. It is also permissionless:",
+        "the outcome is read from the committed Room, so a direct call pays exactly the same.",
+        "No oracle and no admin: the result was sealed program state all along.",
+        "remaining accounts (any order): the Pot, the Room, every ticket holder's wallet."
+      ],
+      "discriminator": [
+        175,
+        42,
+        185,
+        87,
+        144,
+        131,
+        102,
+        212
+      ],
+      "accounts": [],
+      "args": [
+        {
+          "name": "room_id",
+          "type": "u64"
+        },
+        {
+          "name": "nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "setup_core",
+      "docs": [
+        "Create the sealed World (zero readers) and make the Room publicly readable."
+      ],
+      "discriminator": [
+        136,
+        14,
+        208,
+        155,
+        212,
+        174,
+        183,
+        28
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "world",
+          "writable": true
+        },
+        {
+          "name": "world_permission",
+          "writable": true
+        },
+        {
+          "name": "room_permission",
+          "writable": true
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "setup_view",
+      "docs": [
+        "Create one seat's private View (no readers until someone sits down)."
+      ],
+      "discriminator": [
+        14,
+        47,
+        252,
+        151,
+        173,
+        209,
+        169,
+        230
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "world",
+          "writable": true
+        },
+        {
+          "name": "view",
+          "writable": true
+        },
+        {
+          "name": "view_permission",
+          "writable": true
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "seat",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "start_match",
+      "docs": [
+        "Host starts: bots fill empty seats, VRF is requested, the 100 ms crank is scheduled.",
+        "remaining accounts: view0..view7 (writable)."
+      ],
+      "discriminator": [
+        100,
+        246,
+        223,
+        181,
+        176,
+        101,
+        255,
+        19
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "world",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  111,
+                  114,
+                  108,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "oracle_queue",
+          "writable": true,
+          "address": "5hBR571xnXppuCPveTrctfTU7tJLSN94nq7kv7FRK5Tc"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "program_identity",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  100,
+                  101,
+                  110,
+                  116,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vrf_program",
+          "address": "Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz"
+        },
+        {
+          "name": "slot_hashes",
+          "address": "SysvarS1otHashes111111111111111111111111111"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "fill_to",
+          "type": "u8"
+        },
+        {
+          "name": "client_seed",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "tick",
+      "docs": [
+        "One 100 ms step. Called by the crank; any client may call it too as a liveness",
+        "fallback — the slot gate stops double-ticking."
+      ],
+      "discriminator": [
+        92,
+        79,
+        44,
+        8,
+        101,
+        80,
+        63,
+        15
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true
+        },
+        {
+          "name": "world",
+          "writable": true
+        },
+        {
+          "name": "view0",
+          "writable": true
+        },
+        {
+          "name": "view1",
+          "writable": true
+        },
+        {
+          "name": "view2",
+          "writable": true
+        },
+        {
+          "name": "view3",
+          "writable": true
+        },
+        {
+          "name": "view4",
+          "writable": true
+        },
+        {
+          "name": "view5",
+          "writable": true
+        },
+        {
+          "name": "view6",
+          "writable": true
+        },
+        {
+          "name": "view7",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "vote",
+      "docs": [
+        "Sealed ballot: stored in the World, published for everyone at once at the tally."
+      ],
+      "discriminator": [
+        227,
+        110,
+        155,
+        23,
+        136,
+        126,
+        172,
+        25
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true
+        },
+        {
+          "name": "room",
+          "writable": true
+        },
+        {
+          "name": "world",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "target",
+          "type": "u8"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Pot",
+      "discriminator": [
+        238,
+        118,
+        60,
+        175,
+        178,
+        191,
+        59,
+        58
+      ]
+    },
+    {
+      "name": "Room",
+      "discriminator": [
+        156,
+        199,
+        67,
+        27,
+        222,
+        23,
+        185,
+        94
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "BadAccount",
+      "msg": "bad account"
+    },
+    {
+      "code": 6001,
+      "name": "BadSeat",
+      "msg": "bad seat"
+    },
+    {
+      "code": 6002,
+      "name": "SeatTaken",
+      "msg": "seat taken"
+    },
+    {
+      "code": 6003,
+      "name": "AlreadySeated",
+      "msg": "already seated"
+    },
+    {
+      "code": 6004,
+      "name": "NotSeated",
+      "msg": "not seated"
+    },
+    {
+      "code": 6005,
+      "name": "NotReady",
+      "msg": "room is not ready"
+    },
+    {
+      "code": 6006,
+      "name": "WrongPhase",
+      "msg": "wrong phase"
+    },
+    {
+      "code": 6007,
+      "name": "NotHost",
+      "msg": "only the host can do that"
+    },
+    {
+      "code": 6008,
+      "name": "NotEnoughPlayers",
+      "msg": "need at least 4 players (bots count)"
+    },
+    {
+      "code": 6009,
+      "name": "TooEarly",
+      "msg": "too early"
+    },
+    {
+      "code": 6010,
+      "name": "Dead",
+      "msg": "dead players cannot do that"
+    },
+    {
+      "code": 6011,
+      "name": "BadVote",
+      "msg": "bad vote"
+    },
+    {
+      "code": 6012,
+      "name": "TooLong",
+      "msg": "message too long"
+    },
+    {
+      "code": 6013,
+      "name": "NoTicket",
+      "msg": "staked table: buy a ticket on Solana first (or the rollup hasn't seen it yet; retry)"
+    },
+    {
+      "code": 6014,
+      "name": "PotMismatch",
+      "msg": "this table is playing for a different pot"
+    },
+    {
+      "code": 6015,
+      "name": "NotStaked",
+      "msg": "not a staked table"
+    },
+    {
+      "code": 6016,
+      "name": "PotClosed",
+      "msg": "the pot is already settled or refunded"
+    },
+    {
+      "code": 6017,
+      "name": "PotFull",
+      "msg": "the pot is full"
+    },
+    {
+      "code": 6018,
+      "name": "DuplicateTicket",
+      "msg": "you already hold a ticket for this pot"
+    },
+    {
+      "code": 6019,
+      "name": "NotSettleable",
+      "msg": "the committed room does not match this pot (not finished yet?)"
+    },
+    {
+      "code": 6020,
+      "name": "MissingWallet",
+      "msg": "a wallet account is missing"
+    }
+  ],
+  "types": [
+    {
+      "name": "Pot",
+      "docs": [
+        "Base-layer escrow for one staked heist. Never delegated: it lives on Solana and is",
+        "paid out by `settle`, which reads the Room state the TEE committed at lights-on."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "room_id",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "stake",
+            "type": "u64"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "n",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "winner",
+            "docs": [
+              "winning team copied from the committed Room at settle (255 = refunded)"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "wallets",
+            "docs": [
+              "who paid"
+            ],
+            "type": {
+              "array": [
+                "pubkey",
+                8
+              ]
+            }
+          },
+          {
+            "name": "sessions",
+            "docs": [
+              "the session key each ticket authorises to take a seat in the rollup"
+            ],
+            "type": {
+              "array": [
+                "pubkey",
+                8
+              ]
+            }
+          },
+          {
+            "name": "paid",
+            "docs": [
+              "what each ticket received at settle / refund"
+            ],
+            "type": {
+              "array": [
+                "u64",
+                8
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Room",
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "room_id",
+            "type": "u64"
+          },
+          {
+            "name": "last_tick_slot",
+            "type": "u64"
+          },
+          {
+            "name": "start_slot",
+            "type": "u64"
+          },
+          {
+            "name": "phase_end",
+            "docs": [
+              "unix seconds: end of the current meeting / result screen"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "task_id",
+            "type": "i64"
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "host",
+            "type": "pubkey"
+          },
+          {
+            "name": "players",
+            "docs": [
+              "the in-browser session key of each seat (signs every gameplay tx)"
+            ],
+            "type": {
+              "array": [
+                "pubkey",
+                8
+              ]
+            }
+          },
+          {
+            "name": "wallets",
+            "docs": [
+              "the wallet each seat plays for (payouts in staked mode)"
+            ],
+            "type": {
+              "array": [
+                "pubkey",
+                8
+              ]
+            }
+          },
+          {
+            "name": "match_no",
+            "type": "u32"
+          },
+          {
+            "name": "tick",
+            "type": "u32"
+          },
+          {
+            "name": "task_total",
+            "type": "u32"
+          },
+          {
+            "name": "task_done",
+            "type": "u32"
+          },
+          {
+            "name": "chat_count",
+            "type": "u32"
+          },
+          {
+            "name": "ready_mask",
+            "type": "u32"
+          },
+          {
+            "name": "last_seen",
+            "docs": [
+              "unix seconds each seat last acted (lobby presence)"
+            ],
+            "type": {
+              "array": [
+                "u32",
+                8
+              ]
+            }
+          },
+          {
+            "name": "phase",
+            "type": "u8"
+          },
+          {
+            "name": "n_moles",
+            "type": "u8"
+          },
+          {
+            "name": "max_players",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "caller",
+            "type": "u8"
+          },
+          {
+            "name": "reported",
+            "type": "u8"
+          },
+          {
+            "name": "ejected",
+            "type": "u8"
+          },
+          {
+            "name": "ejected_role",
+            "type": "u8"
+          },
+          {
+            "name": "winner",
+            "type": "u8"
+          },
+          {
+            "name": "seed_state",
+            "docs": [
+              "0 = not dealt, 1 = VRF, 2 = fallback (not VRF-grade, flagged in the UI)"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "voted_mask",
+            "type": "u8"
+          },
+          {
+            "name": "n_humans",
+            "type": "u8"
+          },
+          {
+            "name": "staked",
+            "type": "u8"
+          },
+          {
+            "name": "_pad",
+            "type": {
+              "array": [
+                "u8",
+                3
+              ]
+            }
+          },
+          {
+            "name": "is_bot",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "alive_pub",
+            "docs": [
+              "public life status: only updated when a meeting reveals the dead"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "last_votes",
+            "docs": [
+              "votes of the last meeting, published all at once at the tally"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "roles_pub",
+            "docs": [
+              "roles, published only when the game ends"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "names",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    12
+                  ]
+                },
+                8
+              ]
+            }
+          },
+          {
+            "name": "chat_seat",
+            "type": {
+              "array": [
+                "u8",
+                16
+              ]
+            }
+          },
+          {
+            "name": "chat_len",
+            "type": {
+              "array": [
+                "u8",
+                16
+              ]
+            }
+          },
+          {
+            "name": "chat_text",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    48
+                  ]
+                },
+                16
+              ]
+            }
+          },
+          {
+            "name": "pot_nonce",
+            "docs": [
+              "the base-layer Pot this heist is played for (0 = no pot yet / free table)"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "stake",
+            "docs": [
+              "lamports per seat; 0 = free table"
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
+}
