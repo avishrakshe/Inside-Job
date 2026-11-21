@@ -15,45 +15,25 @@ import { WalletState, sol } from "./wallet";
 import { trackEvent } from "../analytics";
 import ChainLog from "./ChainLog";
 import type { TxEvent } from "../chain/client";
+import { FORCE_TOUCH, goLandscape, unrotate, useMedia } from "./phone";
+
+/** Phone: a tap re-enters fullscreen landscape if the browser dropped out of it. */
+const keepLandscape = () => { if (!document.fullscreenElement) goLandscape(); };
 
 const IN_USE = 1 << 4, IN_CUFF = 1 << 5, IN_REPORT = 1 << 6, IN_EMERGENCY = 1 << 7;
 const F_CAN_USE = 1, F_CAN_REPORT = 2, F_CAN_CUFF = 4, F_AT_BUTTON = 8;
 
-function useMedia(q: string) {
-  const [m, setM] = useState(() => typeof matchMedia !== "undefined" && matchMedia(q).matches);
-  useEffect(() => {
-    const mq = matchMedia(q);
-    const f = () => setM(mq.matches);
-    f();
-    mq.addEventListener("change", f);
-    return () => mq.removeEventListener("change", f);
-  }, [q]);
-  return m;
+interface Props {
+  client: GameClient; roomId: number; spectate: boolean; wallet: WalletState | null; onConnectWallet: () => Promise<WalletState>; onExit: () => void;
+  txs: TxEvent[]; txTotals: { all: number; acts: number };
+  /** phone build: fullscreen landscape from the lobby on (the app shell handles rotation) */
+  phone: boolean;
+  /** bumps when the browser/phone Back gesture fires */
+  backTick: number;
 }
 
-/** Phones: go fullscreen + lock landscape on the first tap of a heist (Android). iOS can't lock, so CSS rotates the stage instead. */
-let landscapeTried = false;
-function tryLandscape() {
-  if (landscapeTried) return;
-  landscapeTried = true;
-  const el = document.documentElement as any;
-  const fs = el.requestFullscreen?.({ navigationUI: "hide" }) ?? el.webkitRequestFullscreen?.();
-  Promise.resolve(fs)
-    .then(() => (screen.orientation as any)?.lock?.("landscape"))
-    .catch(() => {});
-}
-function leaveLandscape() {
-  landscapeTried = false;
-  try { (screen.orientation as any)?.unlock?.(); } catch { /* ignore */ }
-  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-}
-
-interface Props { client: GameClient; roomId: number; spectate: boolean; wallet: WalletState | null; onConnectWallet: () => Promise<WalletState>; onExit: () => void; txs: TxEvent[]; txTotals: { all: number; acts: number } }
-
-export default function RoomScreen({ client, roomId, spectate, wallet, onConnectWallet, onExit, txs, txTotals }: Props) {
-  // ?touch=1 forces the phone layout (QA on a desktop browser)
-  const touch = useMedia("(pointer: coarse)") || /[?&]touch=1/.test(location.search);
-  const portrait = useMedia("(orientation: portrait)");
+export default function RoomScreen({ client, roomId, spectate, wallet, onConnectWallet, onExit, txs, txTotals, phone, backTick }: Props) {
+  const touch = useMedia("(pointer: coarse)") || FORCE_TOUCH;
   const [room, setRoom] = useState<RoomState | null>(null);
   const [view, setView] = useState<ViewState | null>(null);
   const [world, setWorld] = useState<WorldState | null>(null);
@@ -206,12 +186,13 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
     prevCd.current = view.killCd;
   }, [view, room]);
 
-  // phones play the heist fullscreen and sideways: joystick left, buttons right
+  // phones: the whole room is a fullscreen landscape game; tablets go fullscreen for the heist
   const inHeist = !!room && room.phase >= PH.PLAY && room.phase <= PH.RESULT;
-  const full = touch && inHeist;
-  const rot = full && portrait;
-  useEffect(() => { if (!full) leaveLandscape(); }, [full]);
-  useEffect(() => () => leaveLandscape(), []);
+  const full = phone || (touch && inHeist);
+
+  const leaveRef = useRef<() => void>(() => onExit());
+  const firstBack = useRef(backTick);
+  useEffect(() => { if (backTick !== firstBack.current) leaveRef.current(); }, [backTick]);
 
   if (!room) return <div className="loading"><div className="spinner" />Reading crew #{roomId} from the rollup…</div>;
 
@@ -219,11 +200,12 @@ export default function RoomScreen({ client, roomId, spectate, wallet, onConnect
     if (seated && (room.phase === PH.LOBBY || room.phase === PH.REVEALED)) await client.leave(roomId, seat).catch(() => {});
     onExit();
   };
+  leaveRef.current = leave;
 
   return (
     <div className="roomscreen">
-      <div className={`stagewrap ${full ? "full" : ""} ${rot ? "rot" : ""}`} onPointerUp={full ? tryLandscape : undefined}>
-        {room.phase === PH.LOBBY && <LobbyScreen client={client} room={room} seat={seat} seated={seated} roomId={roomId} onLeave={leave} onProof={() => setDrawer(true)} />}
+      <div className={`stagewrap ${full ? "full" : ""}`} onPointerUp={phone ? keepLandscape : undefined}>
+        {room.phase === PH.LOBBY && <LobbyScreen client={client} room={room} seat={seat} seated={seated} roomId={roomId} onLeave={leave} onProof={() => setDrawer(true)} touch={touch} />}
         {room.phase === PH.STARTING && <Dealing room={room} canFallback={seated} onFallback={() => client.fallbackDeal(roomId).catch(() => {})} />}
         {room.phase >= PH.PLAY && (
           <GameView client={client} room={room} view={view} seat={seat} seated={seated} roomId={roomId} world={world}
@@ -275,7 +257,7 @@ function InviteButton({ roomId }: { roomId: number }) {
     setDone(true);
     setTimeout(() => setDone(false), 1800);
   };
-  return <button className="btn ghost sm" onClick={copy} title="Copy a link that drops friends straight into this crew">{done ? "✓ Copied" : "🔗 Invite"}</button>;
+  return <button className="btn ghost sm" onClick={copy} title="Copy a link that drops friends straight into this crew" aria-label="Invite">{done ? "✓" : "🔗"}<span className="lbl">{done ? " Copied" : " Invite"}</span></button>;
 }
 
 function NextHeist({ client, roomId }: { client: GameClient; roomId: number }) {
@@ -289,8 +271,8 @@ function NextHeist({ client, roomId }: { client: GameClient; roomId: number }) {
 
 // ------------------------------------------------------------------ lobby
 
-function LobbyScreen({ client, room, seat, seated, roomId, onLeave, onProof }: {
-  client: GameClient; room: RoomState; seat: number; seated: boolean; roomId: number; onLeave: () => void; onProof: () => void;
+function LobbyScreen({ client, room, seat, seated, roomId, onLeave, onProof, touch }: {
+  client: GameClient; room: RoomState; seat: number; seated: boolean; roomId: number; onLeave: () => void; onProof: () => void; touch: boolean;
 }) {
   const [fill, setFill] = useState(6);
   const [busy, setBusy] = useState(false);
@@ -307,11 +289,11 @@ function LobbyScreen({ client, room, seat, seated, roomId, onLeave, onProof }: {
     <div className="lobbyscreen">
       <div className="lobby-main">
         <div className="hud-row">
-          <button className="btn ghost sm" onClick={onLeave}>← {seated ? "Leave" : "Back"}</button>
+          <button className="btn ghost sm" onClick={onLeave} aria-label={seated ? "Leave" : "Back"}>←<span className="lbl"> {seated ? "Leave" : "Back"}</span></button>
           <div className="crewtag">CREW #{roomId} <span className="pill">{PHASE_NAME[room.phase]}</span></div>
           <span className="row">
             <InviteButton roomId={roomId} />
-            <button className="btn ghost sm" onClick={onProof}>🔒 Proof</button>
+            <button className="btn ghost sm" onClick={onProof} aria-label="Proof">🔒<span className="lbl"> Proof</span></button>
           </span>
         </div>
         <LobbyStage names={room.names} occupied={occ} me={seated ? seat : -1} max={room.maxPlayers} />
@@ -338,21 +320,32 @@ function LobbyScreen({ client, room, seat, seated, roomId, onLeave, onProof }: {
         {err && <div className="error inline">{err}</div>}
       </div>
       <div className="lobby-side">
-        <div className="panel">
-          <h3>HOW TO PLAY</h3>
-          <ul className="howlist">
-            <li><span className="k">WASD</span> sneak around the bank</li>
-            <li><span className="k">E</span> work your station (crew) / fake it (Mole)</li>
-            <li><span className="k">Q</span> cuff someone. Mole only, nobody watching</li>
-            <li><span className="k">R</span> report a cuffed body</li>
-            <li><span className="k">F</span> hit the alarm button in the lobby</li>
-            <li><span className="k">M</span> map</li>
-          </ul>
-          <p className="muted small">1 Mole with 4–6 players, 2 with 7–8. Empty seats become on-chain bots that obey the same fog.</p>
-        </div>
         <div className="panel grow">
           <h3>CREW CHAT</h3>
           <Chat client={client} room={room} roomId={roomId} seat={seat} seated={seated} canTalk />
+        </div>
+        <div className="panel">
+          <h3>HOW TO PLAY</h3>
+          {touch ? (
+            <ul className="howlist">
+              <li><span className="k">STICK</span> sneak around the bank</li>
+              <li><span className="k">USE</span> work your station (crew) / fake it (Mole)</li>
+              <li><span className="k">CUFF</span> Mole only, when nobody's watching</li>
+              <li><span className="k">REPORT</span> a cuffed body</li>
+              <li><span className="k">ALARM</span> at the button in the lobby</li>
+              <li><span className="k">🗺</span> map</li>
+            </ul>
+          ) : (
+            <ul className="howlist">
+              <li><span className="k">WASD</span> sneak around the bank</li>
+              <li><span className="k">E</span> work your station (crew) / fake it (Mole)</li>
+              <li><span className="k">Q</span> cuff someone. Mole only, nobody watching</li>
+              <li><span className="k">R</span> report a cuffed body</li>
+              <li><span className="k">F</span> hit the alarm button in the lobby</li>
+              <li><span className="k">M</span> map</li>
+            </ul>
+          )}
+          <p className="muted small">1 Mole with 4–6 players, 2 with 7–8. Empty seats become on-chain bots that obey the same fog.</p>
         </div>
       </div>
     </div>
@@ -695,9 +688,8 @@ function Joystick({ onChange }: { onChange: (v: { dx: number; dy: number }) => v
     const r = ref.current!.getBoundingClientRect();
     const sx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
     const sy = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
-    // stage rotated 90° clockwise (portrait phone): screen → stage axes
-    const rotated = !!ref.current!.closest(".rot");
-    const dx = rotated ? sy : sx, dy = rotated ? -sx : sy;
+    // app rotated 90° clockwise (portrait phone): screen → game axes
+    const [dx, dy] = unrotate(ref.current!, sx, sy);
     const m = Math.min(1, Math.hypot(dx, dy));
     const a = Math.atan2(dy, dx);
     setKnob({ x: Math.cos(a) * m * 34, y: Math.sin(a) * m * 34 });

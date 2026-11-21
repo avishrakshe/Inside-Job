@@ -9,6 +9,8 @@ import Avatar from "./ui/Avatar";
 import { sfx, isMuted, setMuted, onMute } from "./game/sfx";
 import { short, sol, useWallet, WalletState } from "./ui/wallet";
 import { trackEvent } from "./analytics";
+import { PhoneIntro, PhoneMenu } from "./ui/PhoneHome";
+import { goLandscape, useMedia, usePhone } from "./ui/phone";
 
 // the game screen (canvas renderer, minigames, cinematics) loads only when you sit down
 const RoomScreen = lazy(() => import("./ui/RoomScreen"));
@@ -36,6 +38,12 @@ export default function App() {
   const [muted, setM] = useState(isMuted());
   useEffect(() => onMute(setM), []);
   const w = useWallet();
+  // phones: the whole app is a landscape game, opening on an intro every launch
+  const phone = usePhone();
+  const portrait = useMedia("(orientation: portrait)");
+  const [started, setStarted] = useState(false);
+  const [about, setAbout] = useState(false);
+  const start = () => { goLandscape(); sfx.join(); setStarted(true); };
 
   useEffect(() => {
     const c = new GameClient(session);
@@ -61,8 +69,11 @@ export default function App() {
   const [net, setNet] = useState<{ teeMs: number | null; tickRate: number | null }>({ teeMs: null, tickRate: null });
   const tickSeen = useRef<Record<number, { tick: number; at: number }>>({});
 
+  // the room list is only polled outside a room, so it is stale right after you leave one
+  const roomsFresh = useRef(false);
   useEffect(() => {
     if (!client || active) return;
+    roomsFresh.current = false;
     let stop = false;
     const poll = async () => {
       try {
@@ -70,6 +81,7 @@ export default function App() {
         const r = await client.fetchRooms(ALL_IDS);
         const ms = Math.round(performance.now() - t0);
         if (stop) return;
+        roomsFresh.current = true;
         setRooms(Object.fromEntries(ALL_IDS.map((id, k) => [id, r[k]])));
         let rate: number | null = null;
         for (const room of r) {
@@ -93,12 +105,32 @@ export default function App() {
   // (skip a room you just left: the cached list still shows your seat until the next poll)
   const justLeft = useRef({ id: 0, at: 0 });
   useEffect(() => {
-    if (!client || active) return;
+    if (!client || active || !roomsFresh.current) return;
     const me = client.pubkey.toBase58();
     const recent = Date.now() - justLeft.current.at < 15_000;
     const r = Object.values(rooms).find((x) => x && x.players.includes(me) && !(recent && x.roomId === justLeft.current.id));
     if (r) setActive({ id: r.roomId, spectate: false });
   }, [rooms, client, active]);
+
+  // the phone's back gesture / browser Back leaves the room instead of the site
+  const [backTick, setBackTick] = useState(0);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(() => {
+    if (!active) return;
+    if (history.state?.ij !== "room") history.pushState({ ij: "room" }, "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.id]);
+  useEffect(() => {
+    const onPop = () => { if (activeRef.current) setBackTick((n) => n + 1); };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  const exitRoom = () => {
+    if (active) justLeft.current = { id: active.id, at: Date.now() };
+    setActive(null);
+    if (history.state?.ij === "room") history.back();
+  };
 
   // invite links: ?crew=11 drops you into that crew (free tables) or its lobby view (staked)
   const [invite, setInvite] = useState(() => Number(new URLSearchParams(location.search).get("crew") || 0));
@@ -219,9 +251,38 @@ export default function App() {
     teeMs: net.teeMs,
   };
 
+  const freeTables = (
+    <div className="roomgrid">
+      {ROOM_IDS.map((id) => <CrewCard key={id} id={id} r={client ? rooms[id] : undefined} busy={busy} onJoin={join} onWatch={() => setActive({ id, spectate: true })} />)}
+    </div>
+  );
+  const stakedTables = (
+    <div className="roomgrid">
+      {STAKED_ROOM_IDS.map((id) => <CrewCard key={id} id={id} r={client ? rooms[id] : undefined} busy={busy} onJoin={join} onWatch={() => setActive({ id, spectate: true })} />)}
+    </div>
+  );
+  const stakedNote = (
+    <>
+      {!w.available && <p className="muted small">No wallet detected. Install Phantom or Solflare and switch it to <b>Devnet</b>. Need test SOL? <a href={FAUCET_URL} target="_blank" rel="noreferrer">faucet.solana.com</a></p>}
+      {w.wallet && (w.wallet.balance ?? 1) < 0.02 && <p className="muted small">Low on devnet SOL. Top up at <a href={FAUCET_URL} target="_blank" rel="noreferrer">faucet.solana.com</a> (wallet {short(w.wallet.pubkey.toBase58())}).</p>}
+    </>
+  );
+
   return (
-    <div className="shell">
-      {active && (
+    <div className={`shell ${phone ? "phone" : ""} ${phone && portrait ? "rot" : ""}`}>
+      {phone && !started && <PhoneIntro onStart={start} />}
+      {phone && !active && !about && (
+        <PhoneMenu
+          name={name} setName={setName} busy={busy !== null || !client}
+          onPlayFree={quickPlay} onHow={() => setHow(true)} onAbout={() => setAbout(true)}
+          enclave={enclave} walletButton={walletButton} muteButton={muteButton}
+          freeTables={freeTables} stakedTables={stakedTables} stakedNote={stakedNote}
+          chainLog={<ChainLog txs={txs} totals={txTotals.current} inline />}
+          live={stats.live} humans={stats.humans}
+        />
+      )}
+      {phone && !active && about && <button className="btn sm aboutback" onClick={() => setAbout(false)}>← Game</button>}
+      {active && !phone && (
         <header className="topbar">
           <div className="brand" onClick={() => setActive(null)}>
             <MaskLogo /> INSIDE <b>JOB</b>
@@ -241,7 +302,7 @@ export default function App() {
 
       {err && <div className="error floaterr" onClick={() => setErr("")}>{err} <span className="muted">(tap to dismiss)</span></div>}
 
-      {!active && (
+      {!active && (!phone || about) && (
         <Landing
           stats={stats}
           enclave={enclave}
@@ -252,35 +313,22 @@ export default function App() {
           setName={setName}
           walletButton={walletButton}
           muteButton={muteButton}
-          freeTables={
-            <div className="roomgrid">
-              {ROOM_IDS.map((id) => <CrewCard key={id} id={id} r={client ? rooms[id] : undefined} busy={busy} onJoin={join} onWatch={() => setActive({ id, spectate: true })} />)}
-            </div>
-          }
-          stakedTables={
-            <div className="roomgrid">
-              {STAKED_ROOM_IDS.map((id) => <CrewCard key={id} id={id} r={client ? rooms[id] : undefined} busy={busy} onJoin={join} onWatch={() => setActive({ id, spectate: true })} />)}
-            </div>
-          }
-          stakedNote={
-            <>
-              {!w.available && <p className="muted small">No wallet detected. Install Phantom or Solflare and switch it to <b>Devnet</b>. Need test SOL? <a href={FAUCET_URL} target="_blank" rel="noreferrer">faucet.solana.com</a></p>}
-              {w.wallet && (w.wallet.balance ?? 1) < 0.02 && <p className="muted small">Low on devnet SOL. Top up at <a href={FAUCET_URL} target="_blank" rel="noreferrer">faucet.solana.com</a> (wallet {short(w.wallet.pubkey.toBase58())}).</p>}
-            </>
-          }
+          freeTables={freeTables}
+          stakedTables={stakedTables}
+          stakedNote={stakedNote}
         />
       )}
 
       {client && active && (
         <Suspense fallback={<div className="loading"><div className="spinner" />Loading the heist…</div>}>
-          <RoomScreen client={client} roomId={active.id} spectate={active.spectate} wallet={w.wallet} onConnectWallet={w.connect} onExit={() => { justLeft.current = { id: active.id, at: Date.now() }; setActive(null); }} txs={txs} txTotals={txTotals.current} />
+          <RoomScreen client={client} roomId={active.id} spectate={active.spectate} wallet={w.wallet} onConnectWallet={w.connect} onExit={exitRoom} txs={txs} txTotals={txTotals.current} phone={phone} backTick={backTick} />
         </Suspense>
       )}
 
-      {how && <HowTo onClose={() => setHow(false)} />}
+      {how && <HowTo onClose={() => setHow(false)} touch={phone} />}
       {flow && <StakeFlowModal flow={flow} onClose={() => setFlow(null)} />}
-      {/* in a room the log lives in the 🔒 drawer, so it can never cover the game */}
-      {!active && <ChainLog txs={txs} totals={txTotals.current} />}
+      {/* in a room the log lives in the 🔒 drawer; on phones it's the ⛓ menu button, so it never covers the game */}
+      {!active && !phone && <ChainLog txs={txs} totals={txTotals.current} />}
     </div>
   );
 }
@@ -369,8 +417,13 @@ function StakeFlowModal({ flow, onClose }: { flow: StakeFlow; onClose: () => voi
   );
 }
 
-function HowTo({ onClose }: { onClose: () => void }) {
-  const steps: [number, string, string][] = [
+function HowTo({ onClose, touch }: { onClose: () => void; touch?: boolean }) {
+  const steps: [number, string, string][] = touch ? [
+    [2, "CREW", "Steer with the joystick, follow the yellow arrows and tap USE at each station. Fill the vault bar to win."],
+    [0, "MOLE", "You look like everyone else. Tap CUFF on crew when nobody's watching. Fake your tasks."],
+    [3, "REPORT", "Found someone in cuffs? Tap REPORT. Or tap ALARM at the button in the lobby."],
+    [4, "VOTE", "Argue in chat, then cast a sealed ballot. Ballots flip public all at once."],
+  ] : [
     [2, "CREW", "Follow the yellow arrows to your stations and press E to work them. Fill the vault bar to win."],
     [0, "MOLE", "You look like everyone else. Press Q to cuff crew when nobody's watching. Fake your tasks."],
     [3, "REPORT", "Found someone in cuffs? Press R. Or hit the alarm button in the lobby with F."],

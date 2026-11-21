@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { drawRobber } from "../game/sprites";
 import { SEAT_COLORS } from "../game/render";
 
-function useCanvas(paint: (ctx: CanvasRenderingContext2D, w: number, h: number, t: number) => void, deps: unknown[]) {
+export function useCanvas(paint: (ctx: CanvasRenderingContext2D, w: number, h: number, t: number) => void, deps: unknown[]) {
   const ref = useRef<HTMLCanvasElement>(null);
   const paintRef = useRef(paint);
   paintRef.current = paint;
@@ -53,7 +53,7 @@ export function LobbyStage({ names, occupied, me, max }: { names: string[]; occu
     ctx.fillStyle = "#2d5f9a"; ctx.beginPath(); ctx.ellipse(w / 2, h * 0.73, w * 0.12, h * 0.035, 0, 0, 7); ctx.fill();
     // the crew in an arc
     const n = max;
-    const scale = Math.max(1.1, Math.min(w / (n * 42), h / 170));
+    const scale = Math.max(1.1, Math.min(w / (n * 30), h / 125, 3));
     for (let i = 0; i < n; i++) {
       const a = Math.PI * (0.1 + (0.8 * i) / Math.max(1, n - 1));
       const x = w / 2 - Math.cos(a) * w * 0.36;

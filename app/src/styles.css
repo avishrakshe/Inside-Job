@@ -442,7 +442,6 @@ canvas.game { width: 100%; height: 100%; display: block; touch-action: none; }
    .full = touch device mid-heist; .rot = still portrait, so the stage is turned 90° clockwise. */
 body:has(.stagewrap.full) { overflow: hidden; overscroll-behavior: none; }
 .stagewrap.full { position: fixed; inset: 0; margin: 0; border: 0; border-radius: 0; box-shadow: none; z-index: 45; min-height: 0; }
-.stagewrap.full.rot { inset: auto; top: 0; left: 0; width: 100dvh; height: 100vw; transform-origin: top left; transform: rotate(90deg) translateY(-100%); }
 .stagewrap.full .hud-tl { left: max(8px, env(safe-area-inset-left)); top: 8px; max-width: 48%; gap: 6px; }
 .stagewrap.full .backbtn { padding: 4px 10px; }
 .stagewrap.full .hudcard { min-width: 0; max-width: 250px; padding: 6px 9px; border-width: 2px; box-shadow: 0 3px 0 var(--ink); }
@@ -474,3 +473,86 @@ body:has(.stagewrap.full) { overflow: hidden; overscroll-behavior: none; }
 .stagewrap.full .mt-card { min-height: 52px; }
 .stagewrap.full .mt-chat { max-height: none; }
 .stagewrap.full .drawer { top: 6px; bottom: 6px; right: 6px; }
+
+/* ---------- phone build: the whole app is a landscape game.
+   .shell.phone fills the screen; .rot = the phone is portrait, so the shell turns 90° clockwise. */
+body:has(.shell.phone) { overflow: hidden; overscroll-behavior: none; }
+.shell.phone { position: fixed; inset: 0; height: auto; min-height: 0; overflow-x: hidden; overflow-y: auto; container-type: size; }
+.shell.phone.rot { inset: auto; top: 0; left: 0; width: 100dvh; height: 100vw; transform-origin: top left; transform: rotate(90deg) translateY(-100%); }
+.shell.phone .error.floaterr { top: 8px; }
+.shell.phone .lbl { display: none; }
+.aboutback { position: fixed; top: 10px; left: 10px; z-index: 90; }
+
+/* landscape lobby: stage left, chat + how-to right */
+.shell.phone .lobbyscreen { grid-template-columns: minmax(0, 1fr) min(290px, 40%); grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+.shell.phone .lobby-main { min-height: 0; }
+.shell.phone .lobby-side { border-top: 0; border-left: 3px solid var(--ink); overflow: auto; padding: 8px; gap: 8px; }
+.shell.phone .hud-row { top: 6px; left: 6px; right: 6px; }
+.shell.phone .hud-row .btn.sm { padding: 5px 10px; font-size: 14px; }
+.shell.phone .crewtag { font-size: 13px; gap: 6px; }
+.shell.phone .lobby-bar { padding: 6px 8px; gap: 10px; flex-wrap: nowrap; }
+.shell.phone .lobby-bar .count { font-size: 18px; }
+.shell.phone .lobby-bar .btn.big { font-size: 15px; padding: 8px 14px; }
+.shell.phone .lobby-bar .muted { font-size: 13px; }
+.shell.phone .fill { font-size: 12px; gap: 4px; }
+.shell.phone .fill select { padding: 4px 6px; }
+.shell.phone .potbadge { font-size: 12px; padding: 2px 8px; }
+.shell.phone .panel { padding: 8px; }
+.shell.phone .panel h3 { font-size: 12px; margin-bottom: 6px; }
+.shell.phone .howlist { font-size: 12px; gap: 4px; }
+.shell.phone .panel.grow { min-height: 190px; flex: none; }
+.shell.phone .chatbox .msgs { max-height: 140px; min-height: 50px; font-size: 12.5px; }
+.shell.phone .qbtn { font-size: 11px; }
+.shell.phone .howto { max-height: calc(100cqh - 16px); padding: 14px; gap: 8px; }
+.shell.phone .howto h2 { font-size: 20px; }
+.shell.phone .steps { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.shell.phone .step { padding: 8px; }
+.shell.phone .step p { font-size: 12px; }
+.shell.phone .modalwrap { padding: 8px; }
+
+/* intro: plays every time the phone app opens */
+.skystage { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.phoneintro { position: absolute; inset: 0; z-index: 100; overflow: hidden; background: #05031a; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.iris { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 0 300vmax #000; z-index: 2; pointer-events: none; animation: iris 1.2s cubic-bezier(.6, 0, .3, 1) .2s forwards; }
+@keyframes iris { to { width: 300vmax; height: 300vmax; } }
+.pi-center { position: absolute; inset: 0; z-index: 3; display: grid; place-content: center; justify-items: center; gap: 4px; text-align: center; pointer-events: none; padding-bottom: 8%; }
+.pi-mask { width: 96px; height: 58px; filter: drop-shadow(0 4px 0 #000); animation: maskin .7s cubic-bezier(.2, 1.6, .4, 1) .6s both; }
+@keyframes maskin { from { transform: scale(0) rotate(-40deg); opacity: 0; } }
+.pi-logo { margin: 0; font-family: var(--display); font-weight: 700; font-size: clamp(36px, 17cqh, 76px); line-height: 1; letter-spacing: .06em; color: #fff; text-shadow: 0 6px 0 var(--ink), 0 0 36px #ff4d6d66; animation: slam .6s cubic-bezier(.2, 1.6, .4, 1) .85s both; }
+.pi-logo b, .pm-logo b { color: var(--gold); font-weight: 400; }
+.pi-sub { margin: 4px 0 0; font-weight: 800; font-size: 14px; color: #d8d2ff; text-shadow: 0 2px 0 #000; animation: fadein .6s ease 1.3s both; }
+.pi-tap { position: absolute; left: 0; right: 0; bottom: 15%; z-index: 3; text-align: center; font-family: var(--display); font-weight: 700; font-size: 20px; letter-spacing: .22em; color: var(--gold); text-shadow: 0 3px 0 var(--ink); opacity: 0; transition: opacity .4s; }
+.pi-tap.on { opacity: 1; animation: tapblink 1.3s ease-in-out infinite; }
+@keyframes tapblink { 50% { opacity: .3; } }
+.pi-foot { position: absolute; left: 0; right: 0; bottom: 8px; z-index: 3; text-align: center; font-size: 11px; font-weight: 700; color: #a39dc9; }
+
+/* main menu */
+.phonemenu { position: absolute; inset: 0; overflow: hidden; }
+.pm-top { position: absolute; top: 8px; left: max(10px, env(safe-area-inset-left)); right: max(10px, env(safe-area-inset-right)); z-index: 2; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pm-name { display: flex; align-items: center; gap: 6px; background: #0d0a24d9; border: 3px solid var(--ink); border-radius: 14px; padding: 3px 4px 3px 10px; box-shadow: 0 3px 0 var(--ink); }
+.pm-name span { font-family: var(--display); font-weight: 700; font-size: 10px; letter-spacing: .1em; color: var(--muted); }
+.pm-name input { width: 118px; padding: 5px 8px; font-family: var(--display); font-weight: 700; font-size: 14px; letter-spacing: .08em; border-width: 2px; border-radius: 10px; }
+.pm-badges { display: flex; gap: 6px; align-items: center; }
+.pm-badges .badge { font-size: 11px; padding: 4px 8px; }
+.pm-badges .iconbtn { width: 34px; height: 34px; font-size: 15px; border-radius: 10px; }
+.pm-dot { font-size: 11px; font-weight: 800; color: var(--muted); background: #0d0a24d9; border: 2px solid var(--line); border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
+.pm-dot.verified { color: var(--crew); border-color: #1d5a43; }
+.pm-center { position: absolute; inset: 0; z-index: 1; display: grid; place-content: center; justify-items: center; gap: 10px; padding-top: 22px; pointer-events: none; }
+.pm-center > * { pointer-events: auto; }
+.pm-logo { margin: 0; font-family: var(--display); font-weight: 700; font-size: clamp(30px, 13cqh, 60px); line-height: 1; letter-spacing: .06em; color: #fff; text-shadow: 0 5px 0 var(--ink), 0 0 30px #ff4d6d55; pointer-events: none !important; animation: slam .5s cubic-bezier(.2, 1.6, .4, 1) both; }
+.pm-grid { display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 10px; animation: rise .4s ease .1s both; }
+.pmbtn { font-family: var(--display); font-weight: 700; font-size: 17px; letter-spacing: .06em; color: #fff; background: #0d0a24cc; border: 3px solid #f2f0ff; border-radius: 12px; padding: 9px 16px; box-shadow: 0 4px 0 var(--ink); -webkit-tap-highlight-color: transparent; transition: transform .07s, box-shadow .07s; }
+.pmbtn:active:not(:disabled) { transform: translateY(3px); box-shadow: 0 1px 0 var(--ink); }
+.pmbtn:disabled { opacity: .6; }
+.pmbtn.go { background: linear-gradient(180deg, #7dffb6, #2fc47f); color: #04281a; border-color: var(--ink); }
+.pmbtn.gold { color: var(--gold); border-color: var(--gold); }
+.pm-live { font-size: 12px; font-weight: 800; color: #d8d2ff; text-shadow: 0 2px 0 #000; }
+.pm-icons { position: absolute; bottom: 10px; right: max(12px, env(safe-area-inset-right)); z-index: 2; display: flex; gap: 10px; }
+.pmicon { width: 42px; height: 42px; border-radius: 50%; border: 3px solid #f2f0ff; background: #0d0a24cc; color: #fff; font-size: 18px; display: grid; place-items: center; padding: 0; box-shadow: 0 3px 0 var(--ink); }
+.pm-panelwrap { position: absolute; inset: 0; z-index: 5; background: #05031099; display: grid; place-items: center; padding: 8px; }
+.pm-panel { position: relative; width: min(760px, 100%); max-height: 100%; display: flex; flex-direction: column; background: var(--panel); border: 3px solid var(--ink); border-radius: 18px; box-shadow: 0 6px 0 var(--ink); animation: panelin .18s ease-out; }
+.pm-panelhead { position: relative; display: flex; align-items: center; min-height: 48px; padding: 10px 14px; font-family: var(--display); font-weight: 700; font-size: 16px; }
+.pm-panelhead .xbtn { top: 7px; right: 8px; }
+.pm-panelbody { overflow: auto; padding: 0 12px 12px; }
+.pm-panelbody .roomgrid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.pm-panelbody .crewcard { padding: 10px; gap: 6px; }
