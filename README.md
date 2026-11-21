@@ -104,21 +104,24 @@ cached rollup blockhash, so each 100 ms `act` is a single request.
 ## How it works
 
 ```mermaid
-flowchart LR
-  subgraph Browser
+flowchart TB
+  subgraph Browser["🌐 Browser"]
+    direction LR
     SK[Session key<br/>0 SOL, no popups]
     R[Renderer + predictor]
     WASM[WASM replay<br/>program's own rules]
   end
-  subgraph TEE["MagicBlock Private ER (Intel TDX)"]
-    Room[(Room<br/>public)]
+  subgraph TEE["🔒 MagicBlock Private Ephemeral Rollup · Intel TDX"]
+    direction LR
+    VRF{{VRF}}
+    Crank{{Crank<br/>tick / 100 ms}}
     World[(World<br/>0 readers)]
     View[(View × 8<br/>1 seat each)]
     Log[(Move log<br/>sealed)]
-    Crank{{Crank<br/>tick / 100 ms}}
-    VRF{{VRF}}
+    Room[(Room<br/>public)]
   end
-  subgraph Solana["Solana devnet"]
+  subgraph Solana["◎ Solana devnet"]
+    direction LR
     BRoom[(Room<br/>delegated)]
     Pot[(Pot · USDC)]
     Market[(Tip Line Market)]
