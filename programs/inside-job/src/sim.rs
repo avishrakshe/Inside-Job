@@ -27,6 +27,8 @@ pub const HEIST_TICKS: u32 = 5400;
 pub const MEETING_SECS: i64 = 45;
 pub const RESULT_SECS: i64 = 6;
 pub const BOT_VOTE_AFTER_SECS: i64 = 14;
+/// How far from a body (px) a bot still counts someone as "near it".
+pub const SUSPECT_R: i32 = 8 * TILE;
 pub const CORRIDOR: u8 = 8;
 pub const LOBBY_ROOM: u8 = 4;
 pub const BUTTON_X: i32 = 19 * TILE + HALF;
@@ -440,13 +442,7 @@ fn meeting_tick(room: &mut Room, w: &mut World, now: i64) {
     if now >= room.phase_end - MEETING_SECS + BOT_VOTE_AFTER_SECS {
         for i in 0..MAXP {
             if room.is_bot[i] == 1 && w.alive[i] == 1 && room.voted_mask & (1 << i) == 0 {
-                let mut target = VOTE_SKIP;
-                if w.role[i] == ROLE_CREW && w.witness[i] > 0 {
-                    let k = (w.witness[i] - 1) as usize;
-                    if w.alive[k] == 1 {
-                        target = k as u8;
-                    }
-                }
+                let target = bot_ballot(room, w, i);
                 cast_vote(room, w, i, target);
             }
         }
@@ -454,6 +450,81 @@ fn meeting_tick(room: &mut Room, w: &mut World, now: i64) {
     if now >= room.phase_end || all_alive_voted(room, w) {
         tally(room, w, now);
     }
+}
+
+/// Bot ballot odds, in percent.
+const BOT_FOLLOW_PCT: u64 = 60; // join the seat the table is already voting for
+const BOT_SUSPECT_PCT: u64 = 70; // vote whoever they saw nearest the body
+const BOT_GUESS_PCT: u64 = 30; // no lead at all: a hunch instead of a skip
+
+fn votable(room: &Room, w: &World, i: usize, j: usize) -> bool {
+    j != i && room.occupied(j) && w.alive[j] == 1
+}
+
+/// A bot's ballot. It only uses what a player in its seat could know: a cuff it witnessed,
+/// who it could see near the body when the meeting was called (positions are still the
+/// pre-meeting ones), and how the table is already voting. Never another seat's sealed
+/// role, except that Moles know their partners, so they never pile onto one.
+fn bot_ballot(room: &Room, w: &mut World, i: usize) -> u8 {
+    let mole = w.role[i] == ROLE_MOLE;
+    let ok = |w: &World, j: usize| votable(room, w, i, j) && !(mole && w.role[j] == ROLE_MOLE);
+
+    // 1. an eyewitness never forgets
+    if !mole && w.witness[i] > 0 {
+        let k = (w.witness[i] - 1) as usize;
+        if votable(room, w, i, k) {
+            return k as u8;
+        }
+    }
+
+    // 2. the table's lean: the single seat with the most ballots so far
+    let mut lean = [0u8; MAXP];
+    for j in 0..MAXP {
+        if j != i && room.voted_mask & (1 << j) != 0 {
+            let v = w.votes[j] as usize;
+            if v < MAXP && ok(w, v) {
+                lean[v] += 1;
+            }
+        }
+    }
+    let top = *lean.iter().max().unwrap();
+    if top > 0 && lean.iter().filter(|&&c| c == top).count() == 1 {
+        let v = lean.iter().position(|&c| c == top).unwrap();
+        if rng_below(&mut w.rng, 100) < BOT_FOLLOW_PCT {
+            return v as u8;
+        }
+    }
+
+    // 3. a body: suspect whoever it could see standing closest to it
+    let rep = room.reported as usize;
+    if rep < MAXP {
+        let (bx, by) = (w.body_x[rep] as i32, w.body_y[rep] as i32);
+        let (mx, my) = (w.x[i] as i32, w.y[i] as i32);
+        let mut best: Option<(usize, i32)> = None;
+        for j in 0..MAXP {
+            if !ok(w, j) || !can_see(mx, my, w.x[j] as i32, w.y[j] as i32) {
+                continue;
+            }
+            let dd = d2(w.x[j] as i32, w.y[j] as i32, bx, by);
+            if dd <= SUSPECT_R * SUSPECT_R && best.map_or(true, |(_, b)| dd < b) {
+                best = Some((j, dd));
+            }
+        }
+        if let Some((j, _)) = best {
+            if rng_below(&mut w.rng, 100) < BOT_SUSPECT_PCT {
+                return j as u8;
+            }
+        }
+    }
+
+    // 4. no lead: sometimes a hunch (a Mole frames someone), otherwise skip
+    if rng_below(&mut w.rng, 100) < BOT_GUESS_PCT {
+        let pool: Vec<usize> = (0..MAXP).filter(|&j| ok(w, j)).collect();
+        if !pool.is_empty() {
+            return pool[rng_below(&mut w.rng, pool.len() as u64) as usize] as u8;
+        }
+    }
+    VOTE_SKIP
 }
 
 pub fn tally(room: &mut Room, w: &mut World, now: i64) {
@@ -966,6 +1037,85 @@ mod tests {
         assert_eq!(r.phase, PH_ENDED);
         assert_eq!(r.winner, TEAM_CREW);
         assert_eq!(r.roles_pub[m], ROLE_MOLE);
+    }
+
+    /// One human + five bots, everyone in the lobby, a body reported: the bots must
+    /// actually vote (mostly for whoever stood next to the body), not all skip.
+    #[test]
+    fn bots_vote_instead_of_all_skipping() {
+        let (mut suspect_out, mut ballots, mut skips) = (0, 0, 0);
+        for seed in 1..=24u8 {
+            let mut r = room_with(6, true);
+            r.is_bot[0] = 0;
+            r.players[0] = anchor_lang::prelude::Pubkey::new_unique();
+            let mut w = World::zeroed();
+            deal(&mut r, &mut w, [seed; 32]);
+            let victim = (1..6).find(|&j| w.role[j] == ROLE_CREW).unwrap();
+            let suspect = (1..6).find(|&j| j != victim).unwrap();
+            let (bx, by) = (16 * TILE, 12 * TILE);
+            for j in 0..6 {
+                w.x[j] = (22 * TILE + (j as i32) * 8) as i16;
+                w.y[j] = (10 * TILE + (j as i32) * 10) as i16;
+            }
+            w.x[suspect] = (bx + 20) as i16;
+            w.y[suspect] = by as i16;
+            w.alive[victim] = 0;
+            w.body_x[victim] = bx as i16;
+            w.body_y[victim] = by as i16;
+            start_meeting(&mut r, &mut w, 0, victim as u8, 0);
+            cast_vote(&mut r, &mut w, 0, VOTE_SKIP); // the human sits it out
+            let mut vs = views();
+            let mut refs: Vec<&mut View> = vs.iter_mut().collect();
+            tick(&mut r, &mut w, &mut refs, BOT_VOTE_AFTER_SECS);
+            assert_eq!(r.phase, PH_RESULT, "every bot has voted, so the meeting closes");
+            for j in 1..6 {
+                if j == victim {
+                    continue;
+                }
+                ballots += 1;
+                if r.last_votes[j] == VOTE_SKIP {
+                    skips += 1;
+                }
+            }
+            if r.ejected == suspect as u8 {
+                suspect_out += 1;
+            }
+        }
+        assert!(skips * 2 < ballots, "bots skipped {skips} of {ballots} ballots");
+        assert!(suspect_out >= 8, "the seat next to the body went out only {suspect_out}/24 times");
+    }
+
+    #[test]
+    fn mole_bots_never_vote_their_partner() {
+        let mut r = room_with(8, true);
+        let mut w = World::zeroed();
+        deal(&mut r, &mut w, [9u8; 32]);
+        let moles: Vec<usize> = (0..8).filter(|&i| w.role[i] == ROLE_MOLE).collect();
+        assert_eq!(moles.len(), 2);
+        let (a, b) = (moles[0], moles[1]);
+        start_meeting(&mut r, &mut w, 0, NO_SEAT, 0);
+        // the table is piling onto Mole `a`
+        let crew: Vec<usize> = (0..8).filter(|&j| w.role[j] == ROLE_CREW).take(3).collect();
+        for j in crew {
+            cast_vote(&mut r, &mut w, j, a as u8);
+        }
+        for _ in 0..200 {
+            let v = bot_ballot(&r, &mut w, b);
+            assert_ne!(v, a as u8);
+            assert_ne!(v, b as u8);
+        }
+    }
+
+    #[test]
+    fn an_eyewitness_bot_votes_the_culprit() {
+        let mut r = room_with(5, true);
+        let mut w = World::zeroed();
+        deal(&mut r, &mut w, [3u8; 32]);
+        let m = (0..5).find(|&i| w.role[i] == ROLE_MOLE).unwrap();
+        let c = (0..5).find(|&i| w.role[i] == ROLE_CREW).unwrap();
+        start_meeting(&mut r, &mut w, 0, NO_SEAT, 0);
+        w.witness[c] = m as u8 + 1;
+        assert_eq!(bot_ballot(&r, &mut w, c), m as u8);
     }
 
     #[test]
