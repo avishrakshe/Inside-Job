@@ -10,8 +10,9 @@ Built for **MagicBlock Solana Blitz v10 — Entertainment Finance**. Every move,
 | Program (devnet) | `9B5TZmBnskcBrZ1QMCuojqrDEn1dEsb3oVNtgvZ73R2U` |
 | Rollup | MagicBlock TEE devnet — `devnet-tee.magicblock.app`, validator `MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo` |
 | Live proof | checks against the live devnet TEE — [docs/E2E_DEVNET.md](docs/E2E_DEVNET.md) |
-| Free tables (delegated to the TEE) | crews 11–14 |
-| Staked tables | tables 21–22 · 0.01 devnet SOL a seat · winners split the Pot, paid by a Magic Action |
+| Free tables (delegated to the TEE) | crews 31–34 |
+| Staked tables | tables 41–42 · 1 devnet USDC a seat · winners split the Pot, paid by a Magic Action |
+| Tip Line | spectators stake devnet USDC on who the Mole is; resolved on Solana from the sealed result |
 
 ## Why it can't exist on plain Solana
 
@@ -27,6 +28,36 @@ A crew of robbers cracks a vault in real time. One of them (two at 7–8 players
 - **Lights on** — when the game ends, World and every View flip public: anyone can replay the whole deal and check every role.
 - Empty seats are filled by **on-chain bots** that obey the same fog of war.
 
+## Trust the enclave for secrets, not for the result
+
+A TEE keeps the Mole hidden *during* the heist. It should not also be the judge. So nothing
+it decides has to be taken on faith:
+
+1. **Deal commitment, on Solana before play.** At the deal the Room stores
+   `H("inside-job/commit/v1" ‖ seed ‖ room ‖ heist)`, and `commit_deal` pushes that Room to
+   Solana while the seed is still sealed. The roles can't be re-dealt mid-game.
+2. **A move log with a hash chain.** Every tick, `replaylog.rs` records everything the rules
+   take from outside — each human's input, each ballot, the clock — into a sealed log
+   account, and folds it into a SHA-256 chain the Room carries. Bots aren't logged: they're
+   part of the rules.
+3. **Every result is committed.** At lights-on every heist's final Room — winner, roles, deal
+   commitment, log hash — is committed to Solana (free tables too).
+4. **The browser replays the heist.** `tools/replay` compiles the program's *own*
+   `state.rs` + `sim.rs` + `replaylog.rs` to WebAssembly (75 KB). At lights-on the client
+   replays every step from the deal and checks: same World byte-for-byte, same winner,
+   seed matches the commitment, log matches the hash Solana holds.
+
+Why not a ZK proof? A 10 Hz real-time game is thousands of steps of simulation per heist;
+proving that fast enough to matter isn't practical today. And once lights-on makes
+everything public, a deterministic replay gives anyone the same guarantee a validity proof
+would — the outcome follows from the committed inputs — without a trusted setup. Tests:
+16 random heists (humans mashing inputs, meetings, ballots, a 70-minute clock jump) replay
+exactly; a doctored move, seed, role or winner is always caught.
+
+What the TEE is still trusted for: keeping roles, positions and inputs secret until
+lights-on, and not inventing inputs for a human (the log binds the result to *some* input
+sequence; the inputs themselves were private while the game ran).
+
 ## MagicBlock building blocks — take one away and it breaks
 
 | Building block | Job in INSIDE JOB |
@@ -41,9 +72,23 @@ A crew of robbers cracks a vault in real time. One of them (two at 7–8 players
 | **Magic Actions** | Staked tables: `finish` commits the Room to Solana and schedules `settle` there in the same intent, so lights-on *is* the payout. |
 | **Commits** | The committed Room is the only thing Solana learns about a heist: who won and who held which role, after lights-on. |
 
+## Tip Line: a prediction market with no oracle
+
+Spectators stake devnet USDC on **who the Mole is**. The stake goes into a `Market` PDA's
+token account on Solana (`buy_tip`, max 5 USDC, one entry per wallet per heist). The *call*
+is made inside the rollup (`pick`, signed by the session key the tip named): it lands in the
+public Room with a weight = heist time left, so calling it early pays more; re-calling
+resets the weight. Seated players (session or wallet) are refused, dead seats can't be picked,
+and calls close when the heist ends. At lights-on the commit carries a Magic Action,
+`record_tips`, that copies every call plus the published roles into the Market. Right
+calls get their stake back plus a share of the wrong calls' stakes, in proportion to
+stake × weight; if nobody called a Mole, everyone is refunded; no house cut
+(`money::tip_payouts`, conservation-tested). Payouts are claimed with `claim_tip`
+(permissionless). If the heist never resolves, `record_tips` refunds everyone after 20 min.
+
 ## Staked tables: a pot that pays itself out
 
-1. **Ticket (Solana).** `buy_ticket` moves the table's stake from your wallet into that heist's `Pot` PDA and names the in-browser **session key** that may use the ticket. The Pot is plain base-layer state; the money never leaves Solana.
+1. **Ticket (Solana).** `buy_ticket` moves the table's stake (devnet USDC) from your wallet's token account into that heist's `Pot` (its token account) and names the in-browser **session key** that may use the ticket. The Pot is plain base-layer state; the money never leaves Solana.
 2. **Seat (TEE rollup).** `join` reads the Pot from Solana inside the rollup and seats only the session key the ticket named. A different key with the same wallet is refused.
 3. **Lights on → payout.** `finish` flips the World public, commits the Room to Solana and attaches a post-commit **Magic Action** that runs `settle` on Solana. `settle` reads the *committed* Room (winner + published roles) and pays the winning humans from the Pot. **No oracle, no admin:** the result was sealed program state all along.
 4. **Failure paths.** `settle` is permissionless and idempotent, so if the action never lands anyone can run the same payout from the committed Room. If a pot is still open after 20 minutes (crank died, nobody started), **anyone can refund every ticket**. Refund, never re-roll.
@@ -123,7 +168,8 @@ npx tsx scripts/e2e-stake.ts 21          # two wallets stake, play, Magic Action
 
 ## Honest limits
 
-- **The TEE is the trust anchor.** Privacy rests on MagicBlock's Intel TDX validator and its permission checks; the client verifies the enclave's attestation (`verifyTeeRpcIntegrity`) but the program can't prove privacy by itself.
-- **Devnet only.** Staked tables use devnet SOL, not USDC. The spectator "Tip Line" market is next on the roadmap.
+- **The TEE is the trust anchor for privacy, not for the result.** Secrecy during the game rests on MagicBlock's Intel TDX validator and its permission checks (the client verifies the enclave's attestation with `verifyTeeRpcIntegrity`). The outcome is re-derived in the browser from the committed deal and the move log (see above).
+- **Devnet only.** Stakes and tips are devnet USDC (Circle's faucet). Mainnet would need real-money compliance work first.
+- **Insiders.** A player can't tip on their own crew from their seat's keys, but nothing stops a second wallet; tips are capped at 5 USDC.
 - **Who sat where is public** on staked tables (the Pot lists wallets, the Room lists seats); roles stay sealed until lights-on.
 - Players talking over voice can always collude; that's true of every online social-deduction game.
